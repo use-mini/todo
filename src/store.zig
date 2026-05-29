@@ -160,6 +160,39 @@ pub const Store = struct {
             .tags = tag_list.items,
         };
     }
+
+    pub fn listActive(self: *Store, arena: std.mem.Allocator) StoreError![]Item {
+        const sel = try prepare(self.db,
+            "SELECT id, text, created_at FROM items WHERE state='active' ORDER BY id");
+        defer _ = c.sqlite3_finalize(sel);
+
+        var ids: std.ArrayList(i64) = .empty;
+        var texts: std.ArrayList([]const u8) = .empty;
+        var created: std.ArrayList(i64) = .empty;
+        while (true) {
+            const rc = c.sqlite3_step(sel);
+            if (rc == c.SQLITE_DONE) break;
+            if (rc != c.SQLITE_ROW) return StoreError.StepFailed;
+            ids.append(arena, c.sqlite3_column_int64(sel, 0)) catch return StoreError.OutOfMemory;
+            const tp = c.sqlite3_column_text(sel, 1);
+            const ts = std.mem.sliceTo(tp, 0);
+            const dup = arena.dupe(u8, ts) catch return StoreError.OutOfMemory;
+            texts.append(arena, dup) catch return StoreError.OutOfMemory;
+            created.append(arena, c.sqlite3_column_int64(sel, 2)) catch return StoreError.OutOfMemory;
+        }
+
+        const out = arena.alloc(Item, ids.items.len) catch return StoreError.OutOfMemory;
+        for (ids.items, 0..) |id, i| {
+            const item = try self.getById(arena, id);
+            out[i] = Item{
+                .id = id,
+                .text = texts.items[i],
+                .created_at = created.items[i],
+                .tags = item.tags,
+            };
+        }
+        return out;
+    }
 };
 
 test "open + initSchema creates tables idempotently" {
@@ -209,4 +242,29 @@ test "add returns id; getById round-trips text and tags" {
     try std.testing.expectEqual(@as(usize, 2), item.tags.len);
     try std.testing.expectEqualStrings("backend", item.tags[0]);
     try std.testing.expectEqualStrings("urgent", item.tags[1]);
+}
+
+test "listActive returns active items in id order with their tags" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+
+    const t1 = [_][]const u8{ "urgent" };
+    const t2 = [_][]const u8{ "backend", "urgent" };
+    _ = try s.add("first", &t1);
+    _ = try s.add("second", &t2);
+    _ = try s.add("third", &.{});
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const items = try s.listActive(arena);
+    try std.testing.expectEqual(@as(usize, 3), items.len);
+    try std.testing.expectEqualStrings("first", items[0].text);
+    try std.testing.expectEqualStrings("second", items[1].text);
+    try std.testing.expectEqualStrings("third", items[2].text);
+    try std.testing.expectEqual(@as(usize, 1), items[0].tags.len);
+    try std.testing.expectEqual(@as(usize, 2), items[1].tags.len);
+    try std.testing.expectEqual(@as(usize, 0), items[2].tags.len);
 }
