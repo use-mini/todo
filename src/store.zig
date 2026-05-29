@@ -101,9 +101,12 @@ pub const Store = struct {
         errdefer _ = c.sqlite3_exec(self.db, "ROLLBACK", null, null, null);
 
         const ins_item = try prepare(self.db,
-            "INSERT INTO items (text, state, created_at) VALUES (?, 'active', cast(strftime('%s', 'now') as integer))");
+            "INSERT INTO items (text, state, created_at) VALUES (?, 'active', ?)");
         defer _ = c.sqlite3_finalize(ins_item);
         try bindText(ins_item, 1, text);
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
+        try bindInt(ins_item, 2, ts.sec);
         if (c.sqlite3_step(ins_item) != c.SQLITE_DONE) return StoreError.StepFailed;
         const id = c.sqlite3_last_insert_rowid(self.db);
 
