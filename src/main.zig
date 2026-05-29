@@ -151,6 +151,24 @@ fn runAdd(s: *store.Store, cmd: AddArgs) !void {
     _ = try s.add(cmd.text, cmd.tags);
 }
 
+fn runDone(s: *store.Store, cmd: DoneArgs, err_writer: anytype) !void {
+    s.markCompleted(cmd.id) catch |err| switch (err) {
+        store.StoreError.NotFound => {
+            var buf: [128]u8 = undefined;
+            const msg = try std.fmt.bufPrint(&buf, "no todo with id {d}\n", .{cmd.id});
+            try err_writer.writeAll(msg);
+            return;
+        },
+        store.StoreError.AlreadyDone => {
+            var buf: [128]u8 = undefined;
+            const msg = try std.fmt.bufPrint(&buf, "todo {d} already done\n", .{cmd.id});
+            try err_writer.writeAll(msg);
+            return;
+        },
+        else => return err,
+    };
+}
+
 fn ensureParentDir(io: std.Io, path: []const u8) !void {
     const dir = std.fs.path.dirname(path) orelse return;
     std.Io.Dir.cwd().createDirPath(io, dir) catch {};
@@ -200,7 +218,15 @@ pub fn main(init: std.process.Init) !void {
             try stdout.writeStreamingAll(init.io, buf.items);
         },
         .add => |a| try runAdd(&s, a),
-        .done, .clear => {
+        .done => |d| {
+            var ew = std.Io.Writer.Allocating.init(arena);
+            defer ew.deinit();
+            try runDone(&s, d, &ew.writer);
+            const ebuf = ew.toArrayList();
+            if (ebuf.items.len > 0)
+                try stderr.writeStreamingAll(init.io, ebuf.items);
+        },
+        .clear => {
             try stderr.writeStreamingAll(init.io, "command not yet wired\n");
             std.process.exit(1);
         },
@@ -361,4 +387,45 @@ test "runAdd: inserts item and it appears in listActive" {
     const items = try s.listActive(arena);
     try std.testing.expectEqual(@as(usize, 1), items.len);
     try std.testing.expectEqualStrings("buy milk", items[0].text);
+}
+
+test "runDone: marks existing active todo as done" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    const id = try s.add("do laundry", &.{});
+    var ew = std.Io.Writer.Allocating.init(std.testing.allocator);
+    try runDone(&s, .{ .id = id }, &ew.writer);
+    var buf = ew.toArrayList();
+    defer buf.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("", buf.items);
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const items = try s.listActive(arena_state.allocator());
+    try std.testing.expectEqual(@as(usize, 0), items.len);
+}
+
+test "runDone: unknown id prints warning" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    var ew = std.Io.Writer.Allocating.init(std.testing.allocator);
+    try runDone(&s, .{ .id = 999 }, &ew.writer);
+    var buf = ew.toArrayList();
+    defer buf.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("no todo with id 999\n", buf.items);
+}
+
+test "runDone: already done prints warning" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    const id = try s.add("do laundry", &.{});
+    try s.markCompleted(id);
+    var ew = std.Io.Writer.Allocating.init(std.testing.allocator);
+    try runDone(&s, .{ .id = id }, &ew.writer);
+    var buf = ew.toArrayList();
+    defer buf.deinit(std.testing.allocator);
+    try std.testing.expect(std.mem.startsWith(u8, buf.items, "todo "));
+    try std.testing.expect(std.mem.endsWith(u8, buf.items, "already done\n"));
 }

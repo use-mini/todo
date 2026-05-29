@@ -27,6 +27,8 @@ pub const StoreError = error{
     StepFailed,
     BindFailed,
     OutOfMemory,
+    NotFound,
+    AlreadyDone,
 };
 
 fn exec(db: *c.sqlite3, sql: [:0]const u8) StoreError!void {
@@ -239,16 +241,26 @@ pub const Store = struct {
         return out;
     }
 
-    pub fn markCompleted(self: *Store, id: i64) StoreError!bool {
+    pub fn markCompleted(self: *Store, id: i64) StoreError!void {
+        const check = try prepare(self.db,
+            "SELECT state FROM items WHERE id=?");
+        defer _ = c.sqlite3_finalize(check);
+        try bindInt(check, 1, id);
+        const rc = c.sqlite3_step(check);
+        if (rc == c.SQLITE_DONE) return StoreError.NotFound;
+        if (rc != c.SQLITE_ROW) return StoreError.StepFailed;
+        const state_ptr = c.sqlite3_column_text(check, 0);
+        const state = std.mem.sliceTo(state_ptr, 0);
+        if (!std.mem.eql(u8, state, "active")) return StoreError.AlreadyDone;
+
         const stmt = try prepare(self.db,
-            "UPDATE items SET state='completed', completed_at=? WHERE id=? AND state='active'");
+            "UPDATE items SET state='completed', completed_at=? WHERE id=?");
         defer _ = c.sqlite3_finalize(stmt);
         var ts: std.os.linux.timespec = undefined;
         _ = std.os.linux.clock_gettime(.REALTIME, &ts);
         try bindInt(stmt, 1, ts.sec);
         try bindInt(stmt, 2, id);
         if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return StoreError.StepFailed;
-        return c.sqlite3_changes(self.db) > 0;
     }
 
     pub fn clearActive(self: *Store) StoreError!usize {
@@ -406,7 +418,7 @@ test "markCompleted flips active->completed and is one-way" {
     try s.initSchema();
 
     const id = try s.add("ship it", &.{});
-    try std.testing.expect(try s.markCompleted(id));
+    try s.markCompleted(id);
 
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -415,10 +427,10 @@ test "markCompleted flips active->completed and is one-way" {
     const items = try s.listActive(arena);
     try std.testing.expectEqual(@as(usize, 0), items.len);
 
-    // re-marking a non-active item returns false
-    try std.testing.expect(!try s.markCompleted(id));
-    // missing id also returns false
-    try std.testing.expect(!try s.markCompleted(99_999));
+    // re-marking a completed item returns AlreadyDone
+    try std.testing.expectError(StoreError.AlreadyDone, s.markCompleted(id));
+    // missing id returns NotFound
+    try std.testing.expectError(StoreError.NotFound, s.markCompleted(99_999));
 }
 
 test "clearActive transitions every active item; clearActiveByTags scopes by tag" {
