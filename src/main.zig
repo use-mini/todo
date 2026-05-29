@@ -147,6 +147,10 @@ fn todoPath(arena: std.mem.Allocator, env: *std.process.Environ.Map) ![]const u8
     return std.fs.path.join(arena, &.{ home, ".local", "share", "todo", "todo.sqlite" });
 }
 
+fn runAdd(s: *store.Store, cmd: AddArgs) !void {
+    _ = try s.add(cmd.text, cmd.tags);
+}
+
 fn ensureParentDir(io: std.Io, path: []const u8) !void {
     const dir = std.fs.path.dirname(path) orelse return;
     std.Io.Dir.cwd().createDirPath(io, dir) catch {};
@@ -195,7 +199,8 @@ pub fn main(init: std.process.Init) !void {
             const buf = aw.toArrayList();
             try stdout.writeStreamingAll(init.io, buf.items);
         },
-        .add, .done, .clear => {
+        .add => |a| try runAdd(&s, a),
+        .done, .clear => {
             try stderr.writeStreamingAll(init.io, "command not yet wired\n");
             std.process.exit(1);
         },
@@ -343,4 +348,17 @@ test "renderList: flat list shows id, text, tags" {
     var buf = aw.toArrayList();
     defer buf.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("1. first #urgent\n2. second\n", buf.items);
+}
+
+test "runAdd: inserts item and it appears in listActive" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    try runAdd(&s, .{ .text = "buy milk", .tags = &.{"errand"} });
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const items = try s.listActive(arena);
+    try std.testing.expectEqual(@as(usize, 1), items.len);
+    try std.testing.expectEqualStrings("buy milk", items[0].text);
 }
