@@ -193,6 +193,51 @@ pub const Store = struct {
         }
         return out;
     }
+
+    pub fn listActiveByTags(self: *Store, arena: std.mem.Allocator, tags: []const []const u8) StoreError![]Item {
+        if (tags.len == 0) return &.{};
+
+        const sql_prefix: []const u8 =
+            \\SELECT DISTINCT i.id
+            \\FROM items i
+            \\JOIN item_tags t ON t.item_id = i.id
+            \\WHERE i.state = 'active'
+            \\  AND t.tag IN (
+        ;
+
+        var query: std.ArrayList(u8) = .empty;
+        query.appendSlice(arena, sql_prefix) catch return StoreError.OutOfMemory;
+        var k: usize = 0;
+        while (k < tags.len) : (k += 1) {
+            if (k != 0) query.append(arena, ',') catch return StoreError.OutOfMemory;
+            query.append(arena, '?') catch return StoreError.OutOfMemory;
+        }
+        query.appendSlice(arena, ") ORDER BY i.id") catch return StoreError.OutOfMemory;
+        query.append(arena, 0) catch return StoreError.OutOfMemory;
+        const z: [:0]const u8 = query.items[0 .. query.items.len - 1 :0];
+
+        const sel = try prepare(self.db, z);
+        defer _ = c.sqlite3_finalize(sel);
+
+        var ti: usize = 0;
+        while (ti < tags.len) : (ti += 1) {
+            try bindText(sel, @intCast(ti + 1), tags[ti]);
+        }
+
+        var ids: std.ArrayList(i64) = .empty;
+        while (true) {
+            const rc = c.sqlite3_step(sel);
+            if (rc == c.SQLITE_DONE) break;
+            if (rc != c.SQLITE_ROW) return StoreError.StepFailed;
+            ids.append(arena, c.sqlite3_column_int64(sel, 0)) catch return StoreError.OutOfMemory;
+        }
+
+        const out = arena.alloc(Item, ids.items.len) catch return StoreError.OutOfMemory;
+        for (ids.items, 0..) |id, i| {
+            out[i] = try self.getById(arena, id);
+        }
+        return out;
+    }
 };
 
 test "open + initSchema creates tables idempotently" {
@@ -267,4 +312,34 @@ test "listActive returns active items in id order with their tags" {
     try std.testing.expectEqual(@as(usize, 1), items[0].tags.len);
     try std.testing.expectEqual(@as(usize, 2), items[1].tags.len);
     try std.testing.expectEqual(@as(usize, 0), items[2].tags.len);
+}
+
+test "listActiveByTags returns items with any matching tag" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+
+    _ = try s.add("a", &[_][]const u8{"urgent"});
+    _ = try s.add("b", &[_][]const u8{ "urgent", "backend" });
+    _ = try s.add("c", &[_][]const u8{"backend"});
+    _ = try s.add("d", &[_][]const u8{"docs"});
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const filter = [_][]const u8{ "urgent", "backend" };
+    const items = try s.listActiveByTags(arena, &filter);
+    try std.testing.expectEqual(@as(usize, 3), items.len);
+    try std.testing.expectEqualStrings("a", items[0].text);
+    try std.testing.expectEqualStrings("b", items[1].text);
+    try std.testing.expectEqualStrings("c", items[2].text);
+
+    const single = [_][]const u8{"docs"};
+    const items2 = try s.listActiveByTags(arena, &single);
+    try std.testing.expectEqual(@as(usize, 1), items2.len);
+    try std.testing.expectEqualStrings("d", items2[0].text);
+
+    const none = try s.listActiveByTags(arena, &[_][]const u8{"missing"});
+    try std.testing.expectEqual(@as(usize, 0), none.len);
 }
