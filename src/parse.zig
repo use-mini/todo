@@ -34,7 +34,16 @@ pub fn parseAdd(arena: std.mem.Allocator, argv: []const []const u8) ParseError!P
     var j: usize = 0;
     while (j < end) : (j += 1) {
         if (!first) text_buf.append(arena, ' ') catch return ParseError.EmptyText;
-        text_buf.appendSlice(arena, argv[j]) catch return ParseError.EmptyText;
+        const tok = argv[j];
+        if (tok.len >= 3 and tok[0] == '#' and tok[1] == '#' and tok[2] != '#') {
+            const tag_text = tok[2..];
+            const dup_tag = arena.dupe(u8, tag_text) catch return ParseError.EmptyText;
+            tags.append(arena, dup_tag) catch return ParseError.EmptyText;
+            text_buf.append(arena, '#') catch return ParseError.EmptyText;
+            text_buf.appendSlice(arena, tag_text) catch return ParseError.EmptyText;
+        } else {
+            text_buf.appendSlice(arena, tok) catch return ParseError.EmptyText;
+        }
         first = false;
     }
 
@@ -69,4 +78,17 @@ test "bare middle #word stays literal, no tags" {
 
     try std.testing.expectEqualStrings("call the #doctor and schedule an appointment", out.text);
     try std.testing.expectEqual(@as(usize, 0), out.tags.len);
+}
+
+test "inline ##tag adds tag and rewrites to single #" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const argv = [_][]const u8{ "call", "the", "##doctor", "and", "schedule", "an", "appointment" };
+    const out = try parseAdd(arena, &argv);
+
+    try std.testing.expectEqualStrings("call the #doctor and schedule an appointment", out.text);
+    try std.testing.expectEqual(@as(usize, 1), out.tags.len);
+    try std.testing.expectEqualStrings("doctor", out.tags[0]);
 }
