@@ -106,6 +106,68 @@ fn isFlag(s: []const u8) bool {
     return s.len > 0 and s[0] == '-';
 }
 
+fn itemHasTag(it: store.Item, tag: []const u8) bool {
+    for (it.tags) |t| if (std.mem.eql(u8, t, tag)) return true;
+    return false;
+}
+
+fn writeItemLine(writer: anytype, indent: []const u8, it: store.Item) !void {
+    try writer.print("{s}{d}. {s}", .{ indent, it.id, it.text });
+    for (it.tags) |tg| try writer.print(" #{s}", .{tg});
+    try writer.writeAll("\n");
+}
+
+fn writeBreakdown(
+    writer: anytype,
+    items: []const store.Item,
+    filter_tags: []const []const u8,
+) !void {
+    try writer.writeAll("#");
+    try writer.writeAll(filter_tags[0]);
+    var i: usize = 1;
+    while (i < filter_tags.len) : (i += 1) {
+        try writer.writeAll(" + #");
+        try writer.writeAll(filter_tags[i]);
+    }
+    try writer.writeAll("\n");
+    var printed_any = false;
+    for (items) |it| {
+        var all = true;
+        for (filter_tags) |t| if (!itemHasTag(it, t)) {
+            all = false;
+            break;
+        };
+        if (all) {
+            try writeItemLine(writer, "  ", it);
+            printed_any = true;
+        }
+    }
+    if (!printed_any) try writer.writeAll("  (none)\n");
+
+    for (filter_tags) |t| {
+        try writer.writeAll("\n#");
+        try writer.writeAll(t);
+        try writer.writeAll("\n");
+        var any = false;
+        for (items) |it| {
+            if (!itemHasTag(it, t)) continue;
+            var others = false;
+            for (filter_tags) |o| {
+                if (std.mem.eql(u8, o, t)) continue;
+                if (itemHasTag(it, o)) {
+                    others = true;
+                    break;
+                }
+            }
+            if (!others) {
+                try writeItemLine(writer, "  ", it);
+                any = true;
+            }
+        }
+        if (!any) try writer.writeAll("  (none)\n");
+    }
+}
+
 fn renderList(
     arena: std.mem.Allocator,
     writer: anytype,
@@ -132,11 +194,12 @@ fn renderList(
         return;
     }
 
-    for (items) |it| {
-        try writer.print("{d}. {s}", .{ it.id, it.text });
-        for (it.tags) |tg| try writer.print(" #{s}", .{tg});
-        try writer.writeAll("\n");
+    if (cmd.filter_tags.len >= 2) {
+        try writeBreakdown(writer, items, cmd.filter_tags);
+        return;
     }
+
+    for (items) |it| try writeItemLine(writer, "", it);
 }
 
 fn todoPath(arena: std.mem.Allocator, env: *std.process.Environ.Map) ![]const u8 {
@@ -467,4 +530,59 @@ test "runClear: empty store is a no-op" {
     defer s.close();
     try s.initSchema();
     try runClear(&s, .{ .filter_tags = &.{} });
+}
+
+test "renderList: single -l shows a flat list with no header" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    _ = try s.add("a", &[_][]const u8{"urgent"});
+    _ = try s.add("b", &[_][]const u8{"backend"});
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    try renderList(arena, &aw.writer, &s, .{
+        .quiet = false,
+        .all = false,
+        .filter_tags = &[_][]const u8{"urgent"},
+    });
+    var buf = aw.toArrayList();
+    defer buf.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("1. a #urgent\n", buf.items);
+}
+
+test "renderList: two -l tags produce breakdown sections" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    _ = try s.add("a", &[_][]const u8{"urgent"});
+    _ = try s.add("b", &[_][]const u8{ "urgent", "backend" });
+    _ = try s.add("c", &[_][]const u8{"backend"});
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    try renderList(arena, &aw.writer, &s, .{
+        .quiet = false,
+        .all = false,
+        .filter_tags = &[_][]const u8{ "urgent", "backend" },
+    });
+    var buf = aw.toArrayList();
+    defer buf.deinit(std.testing.allocator);
+
+    const expected =
+        "#urgent + #backend\n" ++
+        "  2. b #backend #urgent\n" ++
+        "\n" ++
+        "#urgent\n" ++
+        "  1. a #urgent\n" ++
+        "\n" ++
+        "#backend\n" ++
+        "  3. c #backend\n";
+    try std.testing.expectEqualStrings(expected, buf.items);
 }
