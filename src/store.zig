@@ -238,6 +238,18 @@ pub const Store = struct {
         }
         return out;
     }
+
+    pub fn markCompleted(self: *Store, id: i64) StoreError!bool {
+        const stmt = try prepare(self.db,
+            "UPDATE items SET state='completed', completed_at=? WHERE id=? AND state='active'");
+        defer _ = c.sqlite3_finalize(stmt);
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.REALTIME, &ts);
+        try bindInt(stmt, 1, ts.sec);
+        try bindInt(stmt, 2, id);
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return StoreError.StepFailed;
+        return c.sqlite3_changes(self.db) > 0;
+    }
 };
 
 test "open + initSchema creates tables idempotently" {
@@ -342,4 +354,25 @@ test "listActiveByTags returns items with any matching tag" {
 
     const none = try s.listActiveByTags(arena, &[_][]const u8{"missing"});
     try std.testing.expectEqual(@as(usize, 0), none.len);
+}
+
+test "markCompleted flips active->completed and is one-way" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+
+    const id = try s.add("ship it", &.{});
+    try std.testing.expect(try s.markCompleted(id));
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const items = try s.listActive(arena);
+    try std.testing.expectEqual(@as(usize, 0), items.len);
+
+    // re-marking a non-active item returns false
+    try std.testing.expect(!try s.markCompleted(id));
+    // missing id also returns false
+    try std.testing.expect(!try s.markCompleted(99_999));
 }
