@@ -250,6 +250,50 @@ pub const Store = struct {
         if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return StoreError.StepFailed;
         return c.sqlite3_changes(self.db) > 0;
     }
+
+    pub fn clearActive(self: *Store) StoreError!usize {
+        const stmt = try prepare(self.db,
+            "UPDATE items SET state='cleared', cleared_at=? WHERE state='active'");
+        defer _ = c.sqlite3_finalize(stmt);
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.REALTIME, &ts);
+        try bindInt(stmt, 1, ts.sec);
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return StoreError.StepFailed;
+        return @intCast(c.sqlite3_changes(self.db));
+    }
+
+    pub fn clearActiveByTags(self: *Store, tags: []const []const u8) StoreError!usize {
+        if (tags.len == 0) return 0;
+
+        const head: []const u8 =
+            \\UPDATE items SET state='cleared', cleared_at=?
+            \\WHERE state='active'
+            \\  AND id IN (SELECT item_id FROM item_tags WHERE tag IN (
+        ;
+
+        var query: std.ArrayList(u8) = .empty;
+        query.appendSlice(std.heap.page_allocator, head) catch return StoreError.OutOfMemory;
+        var k: usize = 0;
+        while (k < tags.len) : (k += 1) {
+            if (k != 0) query.append(std.heap.page_allocator, ',') catch return StoreError.OutOfMemory;
+            query.append(std.heap.page_allocator, '?') catch return StoreError.OutOfMemory;
+        }
+        query.appendSlice(std.heap.page_allocator, "))") catch return StoreError.OutOfMemory;
+        query.append(std.heap.page_allocator, 0) catch return StoreError.OutOfMemory;
+        defer query.deinit(std.heap.page_allocator);
+        const z: [:0]const u8 = query.items[0 .. query.items.len - 1 :0];
+
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.REALTIME, &ts);
+        const stmt = try prepare(self.db, z);
+        defer _ = c.sqlite3_finalize(stmt);
+        try bindInt(stmt, 1, ts.sec);
+        for (tags, 0..) |tag, i| {
+            try bindText(stmt, @intCast(2 + i), tag);
+        }
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return StoreError.StepFailed;
+        return @intCast(c.sqlite3_changes(self.db));
+    }
 };
 
 test "open + initSchema creates tables idempotently" {
@@ -375,4 +419,32 @@ test "markCompleted flips active->completed and is one-way" {
     try std.testing.expect(!try s.markCompleted(id));
     // missing id also returns false
     try std.testing.expect(!try s.markCompleted(99_999));
+}
+
+test "clearActive transitions every active item; clearActiveByTags scopes by tag" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+
+    _ = try s.add("a", &[_][]const u8{"urgent"});
+    _ = try s.add("b", &[_][]const u8{"backend"});
+    _ = try s.add("c", &.{});
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const cleared = try s.clearActiveByTags(&[_][]const u8{"urgent"});
+    try std.testing.expectEqual(@as(usize, 1), cleared);
+    const after_tag = try s.listActive(arena);
+    try std.testing.expectEqual(@as(usize, 2), after_tag.len);
+
+    const all = try s.clearActive();
+    try std.testing.expectEqual(@as(usize, 2), all);
+    const after_all = try s.listActive(arena);
+    try std.testing.expectEqual(@as(usize, 0), after_all.len);
+
+    // both are no-ops on an empty active set
+    try std.testing.expectEqual(@as(usize, 0), try s.clearActive());
+    try std.testing.expectEqual(@as(usize, 0), try s.clearActiveByTags(&[_][]const u8{"urgent"}));
 }
