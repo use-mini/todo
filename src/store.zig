@@ -105,7 +105,7 @@ pub const Store = struct {
         defer _ = c.sqlite3_finalize(ins_item);
         try bindText(ins_item, 1, text);
         var ts: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
+        _ = std.os.linux.clock_gettime(.REALTIME, &ts);
         try bindInt(ins_item, 2, ts.sec);
         if (c.sqlite3_step(ins_item) != c.SQLITE_DONE) return StoreError.StepFailed;
         const id = c.sqlite3_last_insert_rowid(self.db);
