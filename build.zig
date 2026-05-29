@@ -9,7 +9,8 @@ pub fn build(b: *std.Build) void {
         "-DSQLITE_DEFAULT_MEMSTATUS=0",
         "-DSQLITE_DQS=0",
     };
-    _ = sqlite_flags;
+
+    const sqlite_dep = b.dependency("sqlite", .{});
 
     const exe = b.addExecutable(.{
         .name = "todo",
@@ -19,13 +20,12 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    // NOTE: SQLite linkage will be added in Task 2 when sqlite3.c is vendored
-    // exe.root_module.linkLibC();
-    // exe.addCSourceFile(.{
-    //     .file = b.path("vendor/sqlite/sqlite3.c"),
-    //     .flags = &sqlite_flags,
-    // });
-    // exe.addIncludePath(b.path("vendor/sqlite"));
+    exe.root_module.link_libc = true;
+    exe.root_module.addCSourceFile(.{
+        .file = sqlite_dep.path("sqlite3.c"),
+        .flags = &sqlite_flags,
+    });
+    exe.root_module.addIncludePath(sqlite_dep.path("."));
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -40,13 +40,12 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    // NOTE: SQLite linkage will be added in Task 2 when sqlite3.c is vendored
-    // unit_tests.root_module.linkLibC();
-    // unit_tests.addCSourceFile(.{
-    //     .file = b.path("vendor/sqlite/sqlite3.c"),
-    //     .flags = &sqlite_flags,
-    // });
-    // unit_tests.addIncludePath(b.path("vendor/sqlite"));
+    unit_tests.root_module.link_libc = true;
+    unit_tests.root_module.addCSourceFile(.{
+        .file = sqlite_dep.path("sqlite3.c"),
+        .flags = &sqlite_flags,
+    });
+    unit_tests.root_module.addIncludePath(sqlite_dep.path("."));
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
