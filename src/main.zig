@@ -168,6 +168,60 @@ fn writeBreakdown(
     }
 }
 
+fn collectAllTags(arena: std.mem.Allocator, items: []const store.Item) ![][]const u8 {
+    var set: std.ArrayList([]const u8) = .empty;
+    for (items) |it| for (it.tags) |t| {
+        var seen = false;
+        for (set.items) |e| if (std.mem.eql(u8, e, t)) {
+            seen = true;
+            break;
+        };
+        if (!seen) try set.append(arena, t);
+    };
+    std.mem.sort([]const u8, set.items, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lt);
+    return set.items;
+}
+
+fn writePerTagBlocks(
+    writer: anytype,
+    items: []const store.Item,
+    tags_in_order: []const []const u8,
+    leading_blank: bool,
+) !void {
+    var any_block = false;
+    for (tags_in_order) |t| {
+        const has_any = blk: {
+            for (items) |it| if (itemHasTag(it, t)) break :blk true;
+            break :blk false;
+        };
+        if (!has_any) continue;
+        if (any_block or leading_blank) try writer.writeAll("\n");
+        try writer.print("#{s}\n", .{t});
+        for (items) |it| if (itemHasTag(it, t)) try writeItemLine(writer, "  ", it);
+        any_block = true;
+    }
+}
+
+fn writeUntaggedBlock(
+    writer: anytype,
+    items: []const store.Item,
+    leading_blank: bool,
+) !void {
+    var has_any = false;
+    for (items) |it| if (it.tags.len == 0) {
+        has_any = true;
+        break;
+    };
+    if (!has_any) return;
+    if (leading_blank) try writer.writeAll("\n");
+    try writer.writeAll("[untagged]\n");
+    for (items) |it| if (it.tags.len == 0) try writeItemLine(writer, "  ", it);
+}
+
 fn renderList(
     arena: std.mem.Allocator,
     writer: anytype,
@@ -194,8 +248,25 @@ fn renderList(
         return;
     }
 
+    if (cmd.all and cmd.filter_tags.len == 0) {
+        const tags = try collectAllTags(arena, items);
+        try writePerTagBlocks(writer, items, tags, false);
+        try writeUntaggedBlock(writer, items, true);
+        return;
+    }
+
     if (cmd.filter_tags.len >= 2) {
         try writeBreakdown(writer, items, cmd.filter_tags);
+        if (cmd.all) {
+            try writer.writeAll("\n");
+            try writePerTagBlocks(writer, items, cmd.filter_tags, false);
+        }
+        return;
+    }
+
+    if (cmd.filter_tags.len == 1) {
+        for (items) |it| try writeItemLine(writer, "", it);
+        if (cmd.all) try writePerTagBlocks(writer, items, cmd.filter_tags, true);
         return;
     }
 
@@ -584,5 +655,66 @@ test "renderList: two -l tags produce breakdown sections" {
         "\n" ++
         "#backend\n" ++
         "  3. c #backend\n";
+    try std.testing.expectEqualStrings(expected, buf.items);
+}
+
+test "renderList: --all with no filter, items grouped by tag with [untagged]" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    _ = try s.add("a", &[_][]const u8{"urgent"});
+    _ = try s.add("b", &[_][]const u8{ "urgent", "backend" });
+    _ = try s.add("c", &.{});
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    try renderList(arena, &aw.writer, &s, .{
+        .quiet = false,
+        .all = true,
+        .filter_tags = &.{},
+    });
+    var buf = aw.toArrayList();
+    defer buf.deinit(std.testing.allocator);
+
+    const expected =
+        "#backend\n" ++
+        "  2. b #backend #urgent\n" ++
+        "\n" ++
+        "#urgent\n" ++
+        "  1. a #urgent\n" ++
+        "  2. b #backend #urgent\n" ++
+        "\n" ++
+        "[untagged]\n" ++
+        "  3. c\n";
+    try std.testing.expectEqualStrings(expected, buf.items);
+}
+
+test "renderList: --all with single -l appends per-tag block" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    _ = try s.add("a", &[_][]const u8{"urgent"});
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    try renderList(arena, &aw.writer, &s, .{
+        .quiet = false,
+        .all = true,
+        .filter_tags = &[_][]const u8{"urgent"},
+    });
+    var buf = aw.toArrayList();
+    defer buf.deinit(std.testing.allocator);
+
+    const expected =
+        "1. a #urgent\n" ++
+        "\n" ++
+        "#urgent\n" ++
+        "  1. a #urgent\n";
     try std.testing.expectEqualStrings(expected, buf.items);
 }
