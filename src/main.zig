@@ -169,6 +169,14 @@ fn runDone(s: *store.Store, cmd: DoneArgs, err_writer: anytype) !void {
     };
 }
 
+fn runClear(s: *store.Store, cmd: ClearArgs) !void {
+    if (cmd.filter_tags.len == 0) {
+        _ = try s.clearActive();
+    } else {
+        _ = try s.clearActiveByTags(cmd.filter_tags);
+    }
+}
+
 fn ensureParentDir(io: std.Io, path: []const u8) !void {
     const dir = std.fs.path.dirname(path) orelse return;
     std.Io.Dir.cwd().createDirPath(io, dir) catch {};
@@ -226,10 +234,7 @@ pub fn main(init: std.process.Init) !void {
             if (ebuf.items.len > 0)
                 try stderr.writeStreamingAll(init.io, ebuf.items);
         },
-        .clear => {
-            try stderr.writeStreamingAll(init.io, "command not yet wired\n");
-            std.process.exit(1);
-        },
+        .clear => |c| try runClear(&s, c),
     }
 }
 
@@ -428,4 +433,38 @@ test "runDone: already done prints warning" {
     defer buf.deinit(std.testing.allocator);
     try std.testing.expect(std.mem.startsWith(u8, buf.items, "todo "));
     try std.testing.expect(std.mem.endsWith(u8, buf.items, "already done\n"));
+}
+
+test "runClear: clears all active todos" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    _ = try s.add("task one", &.{});
+    _ = try s.add("task two", &.{"work"});
+    try runClear(&s, .{ .filter_tags = &.{} });
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const items = try s.listActive(arena_state.allocator());
+    try std.testing.expectEqual(@as(usize, 0), items.len);
+}
+
+test "runClear: clears only matching tagged todos" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    _ = try s.add("task one", &.{"work"});
+    _ = try s.add("task two", &.{"personal"});
+    try runClear(&s, .{ .filter_tags = &.{"work"} });
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const items = try s.listActive(arena_state.allocator());
+    try std.testing.expectEqual(@as(usize, 1), items.len);
+    try std.testing.expectEqualStrings("task two", items[0].text);
+}
+
+test "runClear: empty store is a no-op" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    try runClear(&s, .{ .filter_tags = &.{} });
 }
