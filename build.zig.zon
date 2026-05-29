@@ -1,0 +1,13 @@
+.{
+    .name = .todo,
+    .version = "0.1.0",
+    .fingerprint = 0x5a0eb6a0e340be22,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "vendor",
+        "README.md",
+    },
+    .dependencies = .{},
+}
