@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const store = @import("store.zig");
+const parse = @import("parse.zig");
 
 pub fn main(init: std.process.Init) !void {
     const stdout = Io.File.stdout();
@@ -14,4 +15,5 @@ test "scaffold compiles" {
 test {
     std.testing.refAllDecls(@This());
     _ = store;
+    _ = parse;
 }
