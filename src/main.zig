@@ -106,9 +106,100 @@ fn isFlag(s: []const u8) bool {
     return s.len > 0 and s[0] == '-';
 }
 
+fn renderList(
+    arena: std.mem.Allocator,
+    writer: anytype,
+    s: *store.Store,
+    cmd: ListArgs,
+) !void {
+    const items = if (cmd.filter_tags.len == 0)
+        try s.listActive(arena)
+    else
+        try s.listActiveByTags(arena, cmd.filter_tags);
+
+    if (items.len == 0) {
+        if (cmd.quiet) return;
+        if (cmd.filter_tags.len == 0) {
+            try writer.writeAll("no todos\n");
+        } else {
+            try writer.writeAll("no todos matching ");
+            for (cmd.filter_tags, 0..) |t, i| {
+                if (i != 0) try writer.writeAll(" or ");
+                try writer.print("#{s}", .{t});
+            }
+            try writer.writeAll("\n");
+        }
+        return;
+    }
+
+    for (items) |it| {
+        try writer.print("{d}. {s}", .{ it.id, it.text });
+        for (it.tags) |tg| try writer.print(" #{s}", .{tg});
+        try writer.writeAll("\n");
+    }
+}
+
+fn todoPath(arena: std.mem.Allocator, env: *std.process.Environ.Map) ![]const u8 {
+    if (env.get("TODO_FILE")) |p| return arena.dupe(u8, p);
+    if (env.get("XDG_DATA_HOME")) |x|
+        return std.fs.path.join(arena, &.{ x, "todo", "todo.sqlite" });
+    const home = env.get("HOME") orelse return error.NoHome;
+    return std.fs.path.join(arena, &.{ home, ".local", "share", "todo", "todo.sqlite" });
+}
+
+fn ensureParentDir(io: std.Io, path: []const u8) !void {
+    const dir = std.fs.path.dirname(path) orelse return;
+    std.Io.Dir.cwd().createDirPath(io, dir) catch {};
+}
+
 pub fn main(init: std.process.Init) !void {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const args = try init.minimal.args.toSlice(arena);
+    var argv_list: std.ArrayList([]const u8) = .empty;
+    if (args.len > 1) for (args[1..]) |a| try argv_list.append(arena, a);
+
     const stdout = std.Io.File.stdout();
-    try stdout.writeStreamingAll(init.io, "todo (scaffold)\n");
+    const stderr = std.Io.File.stderr();
+
+    const cmd = classifyArgv(arena, argv_list.items) catch |e| {
+        switch (e) {
+            error.UsageError, error.NotAnId => try stderr.writeStreamingAll(init.io, "usage error\n"),
+            error.InvalidTag => try stderr.writeStreamingAll(init.io, "invalid tag: use [A-Za-z0-9_-]\n"),
+            error.EmptyText => try stderr.writeStreamingAll(init.io, "cannot add an empty todo\n"),
+        }
+        std.process.exit(1);
+    };
+
+    const path_raw = try todoPath(arena, init.environ_map);
+    const path = try arena.dupeZ(u8, path_raw);
+    try ensureParentDir(init.io, path);
+
+    var s = store.Store.open(path) catch {
+        try stderr.writeStreamingAll(init.io, "could not open todo database\n");
+        std.process.exit(2);
+    };
+    defer s.close();
+    s.initSchema() catch {
+        try stderr.writeStreamingAll(init.io, "could not initialize todo database\n");
+        std.process.exit(2);
+    };
+
+    switch (cmd) {
+        .list => |l| {
+            var aw = std.Io.Writer.Allocating.init(arena);
+            defer aw.deinit();
+            try renderList(arena, &aw.writer, &s, l);
+            const buf = aw.toArrayList();
+            try stdout.writeStreamingAll(init.io, buf.items);
+        },
+        .add, .done, .clear => {
+            try stderr.writeStreamingAll(init.io, "command not yet wired\n");
+            std.process.exit(1);
+        },
+    }
 }
 
 test {
@@ -202,4 +293,54 @@ test "classifyArgv: add with -t and trailing #tag" {
     try std.testing.expect(cmd == .add);
     try std.testing.expectEqualStrings("call the lab", cmd.add.text);
     try std.testing.expectEqual(@as(usize, 2), cmd.add.tags.len);
+}
+
+test "renderList: empty active set, no -q, prints 'no todos'" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    try renderList(arena, &aw.writer, &s, .{ .quiet = false, .all = false, .filter_tags = &.{} });
+    var buf = aw.toArrayList();
+    defer buf.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("no todos\n", buf.items);
+}
+
+test "renderList: empty active set, -q, prints nothing" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    try renderList(arena, &aw.writer, &s, .{ .quiet = true, .all = false, .filter_tags = &.{} });
+    var buf = aw.toArrayList();
+    defer buf.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("", buf.items);
+}
+
+test "renderList: flat list shows id, text, tags" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    _ = try s.add("first", &[_][]const u8{"urgent"});
+    _ = try s.add("second", &.{});
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    try renderList(arena, &aw.writer, &s, .{ .quiet = false, .all = false, .filter_tags = &.{} });
+    var buf = aw.toArrayList();
+    defer buf.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("1. first #urgent\n2. second\n", buf.items);
 }
