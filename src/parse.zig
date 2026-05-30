@@ -46,13 +46,23 @@ fn trimAscii(s: []const u8) []const u8 {
 }
 
 pub fn parseAdd(arena: std.mem.Allocator, argv: []const []const u8) ParseError!Parsed {
-    var end = argv.len;
-    while (end > 0 and isTagToken(argv[end - 1])) : (end -= 1) {}
+    // Split multi-word tokens (e.g. from a single quoted shell arg) into individual words
+    // so that embedded #tags and ##tags are recognized at word boundaries.
+    var words: std.ArrayList([]const u8) = .empty;
+    for (argv) |tok| {
+        var it = std.mem.splitScalar(u8, tok, ' ');
+        while (it.next()) |w| {
+            if (w.len > 0) words.append(arena, w) catch return ParseError.EmptyText;
+        }
+    }
+
+    var end = words.items.len;
+    while (end > 0 and isTagToken(words.items[end - 1])) : (end -= 1) {}
 
     var tags: std.ArrayList([]const u8) = .empty;
     var i: usize = end;
-    while (i < argv.len) : (i += 1) {
-        const norm = try validateAndLowercase(arena, argv[i][1..]);
+    while (i < words.items.len) : (i += 1) {
+        const norm = try validateAndLowercase(arena, words.items[i][1..]);
         try appendTag(&tags, arena, norm);
     }
 
@@ -61,7 +71,7 @@ pub fn parseAdd(arena: std.mem.Allocator, argv: []const []const u8) ParseError!P
     var j: usize = 0;
     while (j < end) : (j += 1) {
         if (!first) text_buf.append(arena, ' ') catch return ParseError.EmptyText;
-        const tok = argv[j];
+        const tok = words.items[j];
         if (tok.len >= 3 and tok[0] == '#' and tok[1] == '#' and tok[2] != '#') {
             const norm = try validateAndLowercase(arena, tok[2..]);
             try appendTag(&tags, arena, norm);
@@ -167,6 +177,45 @@ test "whitespace-only text is treated as empty" {
 pub fn normalizeFilterTag(arena: std.mem.Allocator, raw: []const u8) ParseError![]u8 {
     const stripped = if (raw.len > 0 and raw[0] == '#') raw[1..] else raw;
     return try validateAndLowercase(arena, stripped);
+}
+
+test "parseAdd: trailing #tag extracted from within a single quoted-string token" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const argv = [_][]const u8{"text #prog"};
+    const out = try parseAdd(arena, &argv);
+
+    try std.testing.expectEqualStrings("text", out.text);
+    try std.testing.expectEqual(@as(usize, 1), out.tags.len);
+    try std.testing.expectEqualStrings("prog", out.tags[0]);
+}
+
+test "parseAdd: inline ##tag extracted from within a single quoted-string token" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const argv = [_][]const u8{"call ##doctor for refill"};
+    const out = try parseAdd(arena, &argv);
+
+    try std.testing.expectEqualStrings("call #doctor for refill", out.text);
+    try std.testing.expectEqual(@as(usize, 1), out.tags.len);
+    try std.testing.expectEqualStrings("doctor", out.tags[0]);
+}
+
+test "parseAdd: all words preserved with inline ##tag in single quoted token" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const argv = [_][]const u8{"call ##doctor fore refill"};
+    const out = try parseAdd(arena, &argv);
+
+    try std.testing.expectEqualStrings("call #doctor fore refill", out.text);
+    try std.testing.expectEqual(@as(usize, 1), out.tags.len);
+    try std.testing.expectEqualStrings("doctor", out.tags[0]);
 }
 
 test "normalizeFilterTag accepts with and without leading #" {

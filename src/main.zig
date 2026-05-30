@@ -12,7 +12,7 @@ pub const CliError = error{
 pub const ListArgs = struct { quiet: bool, all: bool, filter_tags: []const []const u8 };
 pub const AddArgs = struct { text: []const u8, tags: []const []const u8 };
 pub const DoneArgs = struct { id: i64 };
-pub const ClearArgs = struct { filter_tags: []const []const u8 };
+pub const ClearArgs = struct { filter_tags: []const []const u8, all: bool = false };
 
 pub const Command = union(enum) {
     list: ListArgs,
@@ -33,13 +33,18 @@ pub fn classifyArgv(arena: std.mem.Allocator, argv: []const []const u8) (CliErro
     }
 
     if (std.mem.eql(u8, argv[0], "clear")) {
+        var all = false;
         var tags: std.ArrayList([]const u8) = .empty;
         var i: usize = 1;
         while (i < argv.len) : (i += 1) {
-            const norm = try parse.normalizeFilterTag(arena, argv[i]);
-            tags.append(arena, norm) catch return CliError.UsageError;
+            if (std.mem.eql(u8, argv[i], "--all")) {
+                all = true;
+            } else {
+                const norm = try parse.normalizeFilterTag(arena, argv[i]);
+                tags.append(arena, norm) catch return CliError.UsageError;
+            }
         }
-        return .{ .clear = .{ .filter_tags = tags.items } };
+        return .{ .clear = .{ .filter_tags = tags.items, .all = all } };
     }
 
     var quiet = false;
@@ -304,6 +309,7 @@ fn runDone(s: *store.Store, cmd: DoneArgs, err_writer: anytype) !void {
 }
 
 fn runClear(s: *store.Store, cmd: ClearArgs) !void {
+    if (cmd.filter_tags.len == 0 and !cmd.all) return;
     if (cmd.filter_tags.len == 0) {
         _ = try s.clearActive();
     } else {
@@ -424,13 +430,24 @@ test "classifyArgv: done <N>" {
     try std.testing.expectEqual(@as(i64, 17), cmd.done.id);
 }
 
-test "classifyArgv: clear with no args" {
+test "classifyArgv: clear with no args does not set all flag" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const cmd = try classifyArgv(arena, &[_][]const u8{"clear"});
     try std.testing.expect(cmd == .clear);
     try std.testing.expectEqual(@as(usize, 0), cmd.clear.filter_tags.len);
+    try std.testing.expect(!cmd.clear.all);
+}
+
+test "classifyArgv: clear --all sets all flag" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const cmd = try classifyArgv(arena, &[_][]const u8{ "clear", "--all" });
+    try std.testing.expect(cmd == .clear);
+    try std.testing.expectEqual(@as(usize, 0), cmd.clear.filter_tags.len);
+    try std.testing.expect(cmd.clear.all);
 }
 
 test "classifyArgv: clear with #tag args" {
@@ -569,13 +586,13 @@ test "runDone: already done prints warning" {
     try std.testing.expect(std.mem.endsWith(u8, buf.items, "already done\n"));
 }
 
-test "runClear: clears all active todos" {
+test "runClear: --all clears all active todos" {
     var s = try store.Store.open(":memory:");
     defer s.close();
     try s.initSchema();
     _ = try s.add("task one", &.{});
     _ = try s.add("task two", &.{"work"});
-    try runClear(&s, .{ .filter_tags = &.{} });
+    try runClear(&s, .{ .filter_tags = &.{}, .all = true });
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const items = try s.listActive(arena_state.allocator());
@@ -596,11 +613,24 @@ test "runClear: clears only matching tagged todos" {
     try std.testing.expectEqualStrings("task two", items[0].text);
 }
 
-test "runClear: empty store is a no-op" {
+test "runClear: no filter and no --all is a no-op, prevents accidental deletion" {
     var s = try store.Store.open(":memory:");
     defer s.close();
     try s.initSchema();
-    try runClear(&s, .{ .filter_tags = &.{} });
+    _ = try s.add("task one", &.{"work"});
+    _ = try s.add("task two", &.{});
+    try runClear(&s, .{ .filter_tags = &.{}, .all = false });
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const items = try s.listActive(arena_state.allocator());
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+}
+
+test "runClear: empty store with --all is a no-op" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    try runClear(&s, .{ .filter_tags = &.{}, .all = true });
 }
 
 test "renderList: single -l shows a flat list with no header" {
