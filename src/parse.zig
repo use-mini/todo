@@ -91,7 +91,7 @@ pub fn parseAdd(arena: std.mem.Allocator, argv: []const []const u8) ParseError!P
     };
 }
 
-test "trailing #tag extracted, text stripped" {
+test "trailing @tag extracted, text stripped" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -104,7 +104,7 @@ test "trailing #tag extracted, text stripped" {
     try std.testing.expectEqualStrings("medic", out.tags[0]);
 }
 
-test "bare middle #word stays literal, no tags" {
+test "bare middle @word stays literal, no tags" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -116,7 +116,7 @@ test "bare middle #word stays literal, no tags" {
     try std.testing.expectEqual(@as(usize, 0), out.tags.len);
 }
 
-test "inline ##tag adds tag and rewrites to single #" {
+test "inline @@tag adds tag and rewrites to single @" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -178,7 +178,7 @@ pub fn normalizeFilterTag(arena: std.mem.Allocator, raw: []const u8) ParseError!
     return try validateAndLowercase(arena, stripped);
 }
 
-test "parseAdd: trailing #tag extracted from within a single quoted-string token" {
+test "parseAdd: trailing @tag extracted from within a single quoted-string token" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -191,7 +191,7 @@ test "parseAdd: trailing #tag extracted from within a single quoted-string token
     try std.testing.expectEqualStrings("prog", out.tags[0]);
 }
 
-test "parseAdd: inline ##tag extracted from within a single quoted-string token" {
+test "parseAdd: inline @@tag extracted from within a single quoted-string token" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -204,7 +204,7 @@ test "parseAdd: inline ##tag extracted from within a single quoted-string token"
     try std.testing.expectEqualStrings("doctor", out.tags[0]);
 }
 
-test "parseAdd: all words preserved with inline ##tag in single quoted token" {
+test "parseAdd: all words preserved with inline @@tag in single quoted token" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -217,7 +217,7 @@ test "parseAdd: all words preserved with inline ##tag in single quoted token" {
     try std.testing.expectEqualStrings("doctor", out.tags[0]);
 }
 
-test "normalizeFilterTag accepts with and without leading #" {
+test "normalizeFilterTag accepts with and without leading @" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();

@@ -271,7 +271,7 @@ fn renderList(
             try writer.writeAll("no todos matching ");
             for (cmd.filter_tags, 0..) |t, i| {
                 if (i != 0) try writer.writeAll(" or ");
-                try writer.print("#{s}", .{t});
+                try writer.print("@{s}", .{t});
             }
             try writer.writeAll("\n");
         }
@@ -477,7 +477,7 @@ test "classifyArgv: clear --all sets all flag" {
     try std.testing.expect(cmd.clear.all);
 }
 
-test "classifyArgv: clear with #tag args" {
+test "classifyArgv: clear with @tag args" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -488,7 +488,7 @@ test "classifyArgv: clear with #tag args" {
     try std.testing.expectEqualStrings("backend", cmd.clear.filter_tags[1]);
 }
 
-test "classifyArgv: add with trailing #tag" {
+test "classifyArgv: add with trailing @tag" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -499,7 +499,7 @@ test "classifyArgv: add with trailing #tag" {
     try std.testing.expectEqualStrings("medic", cmd.add.tags[0]);
 }
 
-test "classifyArgv: add with -t and trailing #tag" {
+test "classifyArgv: add with -t and trailing @tag" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
