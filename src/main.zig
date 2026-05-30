@@ -116,9 +116,31 @@ fn itemHasTag(it: store.Item, tag: []const u8) bool {
     return false;
 }
 
-fn writeItemLine(writer: anytype, indent: []const u8, it: store.Item) !void {
+fn itemTextWidth(indent: []const u8, it: store.Item) usize {
+    var n = it.id;
+    var digits: usize = 1;
+    while (n >= 10) : (n = @divTrunc(n, 10)) digits += 1;
+    return indent.len + digits + 2 + it.text.len;
+}
+
+fn maxWidth(indent: []const u8, items: []const store.Item) usize {
+    var m: usize = 0;
+    for (items) |it| {
+        const w = itemTextWidth(indent, it);
+        if (w > m) m = w;
+    }
+    return m;
+}
+
+fn writeItemLine(writer: anytype, indent: []const u8, it: store.Item, col: usize) !void {
     try writer.print("{s}{d}. {s}", .{ indent, it.id, it.text });
-    for (it.tags) |tg| try writer.print(" #{s}", .{tg});
+    if (it.tags.len > 0) {
+        const w = itemTextWidth(indent, it);
+        var i = w;
+        while (i < col) : (i += 1) try writer.writeByte(' ');
+        try writer.writeAll(" |");
+        for (it.tags) |tg| try writer.print(" @{s}", .{tg});
+    }
     try writer.writeAll("\n");
 }
 
@@ -127,11 +149,12 @@ fn writeBreakdown(
     items: []const store.Item,
     filter_tags: []const []const u8,
 ) !void {
-    try writer.writeAll("#");
+    const col = maxWidth("  ", items);
+    try writer.writeAll("@");
     try writer.writeAll(filter_tags[0]);
     var i: usize = 1;
     while (i < filter_tags.len) : (i += 1) {
-        try writer.writeAll(" + #");
+        try writer.writeAll(" + @");
         try writer.writeAll(filter_tags[i]);
     }
     try writer.writeAll("\n");
@@ -143,14 +166,14 @@ fn writeBreakdown(
             break;
         };
         if (all) {
-            try writeItemLine(writer, "  ", it);
+            try writeItemLine(writer, "  ", it, col);
             printed_any = true;
         }
     }
     if (!printed_any) try writer.writeAll("  (none)\n");
 
     for (filter_tags) |t| {
-        try writer.writeAll("\n#");
+        try writer.writeAll("\n@");
         try writer.writeAll(t);
         try writer.writeAll("\n");
         var any = false;
@@ -165,7 +188,7 @@ fn writeBreakdown(
                 }
             }
             if (!others) {
-                try writeItemLine(writer, "  ", it);
+                try writeItemLine(writer, "  ", it, col);
                 any = true;
             }
         }
@@ -197,6 +220,7 @@ fn writePerTagBlocks(
     tags_in_order: []const []const u8,
     leading_blank: bool,
 ) !void {
+    const col = maxWidth("  ", items);
     var any_block = false;
     for (tags_in_order) |t| {
         const has_any = blk: {
@@ -205,8 +229,8 @@ fn writePerTagBlocks(
         };
         if (!has_any) continue;
         if (any_block or leading_blank) try writer.writeAll("\n");
-        try writer.print("#{s}\n", .{t});
-        for (items) |it| if (itemHasTag(it, t)) try writeItemLine(writer, "  ", it);
+        try writer.print("@{s}\n", .{t});
+        for (items) |it| if (itemHasTag(it, t)) try writeItemLine(writer, "  ", it, col);
         any_block = true;
     }
 }
@@ -224,7 +248,8 @@ fn writeUntaggedBlock(
     if (!has_any) return;
     if (leading_blank) try writer.writeAll("\n");
     try writer.writeAll("[untagged]\n");
-    for (items) |it| if (it.tags.len == 0) try writeItemLine(writer, "  ", it);
+    const col = maxWidth("  ", items);
+    for (items) |it| if (it.tags.len == 0) try writeItemLine(writer, "  ", it, col);
 }
 
 fn renderList(
@@ -270,12 +295,14 @@ fn renderList(
     }
 
     if (cmd.filter_tags.len == 1) {
-        for (items) |it| try writeItemLine(writer, "", it);
+        const col = maxWidth("", items);
+        for (items) |it| try writeItemLine(writer, "", it, col);
         if (cmd.all) try writePerTagBlocks(writer, items, cmd.filter_tags, true);
         return;
     }
 
-    for (items) |it| try writeItemLine(writer, "", it);
+    const col = maxWidth("", items);
+    for (items) |it| try writeItemLine(writer, "", it, col);
 }
 
 fn todoPath(arena: std.mem.Allocator, env: *std.process.Environ.Map) ![]const u8 {
@@ -454,7 +481,7 @@ test "classifyArgv: clear with #tag args" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const cmd = try classifyArgv(arena, &[_][]const u8{ "clear", "#urgent", "#backend" });
+    const cmd = try classifyArgv(arena, &[_][]const u8{ "clear", "@urgent", "@backend" });
     try std.testing.expect(cmd == .clear);
     try std.testing.expectEqual(@as(usize, 2), cmd.clear.filter_tags.len);
     try std.testing.expectEqualStrings("urgent", cmd.clear.filter_tags[0]);
@@ -465,7 +492,7 @@ test "classifyArgv: add with trailing #tag" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const cmd = try classifyArgv(arena, &[_][]const u8{ "call", "the", "lab", "#medic" });
+    const cmd = try classifyArgv(arena, &[_][]const u8{ "call", "the", "lab", "@medic" });
     try std.testing.expect(cmd == .add);
     try std.testing.expectEqualStrings("call the lab", cmd.add.text);
     try std.testing.expectEqual(@as(usize, 1), cmd.add.tags.len);
@@ -476,7 +503,7 @@ test "classifyArgv: add with -t and trailing #tag" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const cmd = try classifyArgv(arena, &[_][]const u8{ "-t", "urgent", "call", "the", "lab", "#medic" });
+    const cmd = try classifyArgv(arena, &[_][]const u8{ "-t", "urgent", "call", "the", "lab", "@medic" });
     try std.testing.expect(cmd == .add);
     try std.testing.expectEqualStrings("call the lab", cmd.add.text);
     try std.testing.expectEqual(@as(usize, 2), cmd.add.tags.len);
@@ -529,7 +556,7 @@ test "renderList: flat list shows id, text, tags" {
     try renderList(arena, &aw.writer, &s, .{ .quiet = false, .all = false, .filter_tags = &.{} });
     var buf = aw.toArrayList();
     defer buf.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("1. first #urgent\n2. second\n", buf.items);
+    try std.testing.expectEqualStrings("1. first  | @urgent\n2. second\n", buf.items);
 }
 
 test "runAdd: inserts item and it appears in listActive" {
@@ -652,7 +679,7 @@ test "renderList: single -l shows a flat list with no header" {
     });
     var buf = aw.toArrayList();
     defer buf.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("1. a #urgent\n", buf.items);
+    try std.testing.expectEqualStrings("1. a | @urgent\n", buf.items);
 }
 
 test "renderList: two -l tags produce breakdown sections" {
@@ -677,14 +704,14 @@ test "renderList: two -l tags produce breakdown sections" {
     defer buf.deinit(std.testing.allocator);
 
     const expected =
-        "#urgent + #backend\n" ++
-        "  2. b #backend #urgent\n" ++
+        "@urgent + @backend\n" ++
+        "  2. b | @backend @urgent\n" ++
         "\n" ++
-        "#urgent\n" ++
-        "  1. a #urgent\n" ++
+        "@urgent\n" ++
+        "  1. a | @urgent\n" ++
         "\n" ++
-        "#backend\n" ++
-        "  3. c #backend\n";
+        "@backend\n" ++
+        "  3. c | @backend\n";
     try std.testing.expectEqualStrings(expected, buf.items);
 }
 
@@ -710,12 +737,12 @@ test "renderList: --all with no filter, items grouped by tag with [untagged]" {
     defer buf.deinit(std.testing.allocator);
 
     const expected =
-        "#backend\n" ++
-        "  2. b #backend #urgent\n" ++
+        "@backend\n" ++
+        "  2. b | @backend @urgent\n" ++
         "\n" ++
-        "#urgent\n" ++
-        "  1. a #urgent\n" ++
-        "  2. b #backend #urgent\n" ++
+        "@urgent\n" ++
+        "  1. a | @urgent\n" ++
+        "  2. b | @backend @urgent\n" ++
         "\n" ++
         "[untagged]\n" ++
         "  3. c\n";
@@ -742,9 +769,9 @@ test "renderList: --all with single -l appends per-tag block" {
     defer buf.deinit(std.testing.allocator);
 
     const expected =
-        "1. a #urgent\n" ++
+        "1. a | @urgent\n" ++
         "\n" ++
-        "#urgent\n" ++
-        "  1. a #urgent\n";
+        "@urgent\n" ++
+        "  1. a | @urgent\n";
     try std.testing.expectEqualStrings(expected, buf.items);
 }

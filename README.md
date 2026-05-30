@@ -17,15 +17,23 @@ todo                              list active todos
 todo -q                           same, silent if empty (use this in your shellrc)
 todo -l <tag> [<tag>...]          filter by tag (OR match)
 todo --all                        group active todos by tag, plus [untagged]
-todo "text #tag1 #tag2"           add; trailing #tags are extracted
-todo "call ##doctor for refill"   inline tag: stored as "#doctor", tag = doctor
+todo "text @tag1 @tag2"           add; trailing @tags are extracted
+todo "call @@doctor for refill"   inline tag: stored as "@doctor", tag = doctor
 todo -t urgent "text"             add with explicit tag (repeatable)
 todo done <id>                    mark complete (use the id shown in listings)
-todo clear                        soft-delete all active items
-todo clear #tag [#tag...]         soft-delete active items having any listed tag
+todo clear --all                  soft-delete all active items
+todo clear @tag [@tag...]         soft-delete active items having any listed tag
 ```
 
 Tags are case-insensitive and normalized to lowercase. They must match `[A-Za-z0-9_-]+`.
+
+Listings show tags aligned to a pipe separator:
+
+```
+1. call the lab      | @urgent
+2. buy milk          | @errand @quick
+3. read the docs
+```
 
 ## Shell integration
 

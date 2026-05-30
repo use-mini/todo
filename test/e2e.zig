@@ -55,7 +55,7 @@ test "bug1: --all groups items added with trailing #tag" {
     var buf: [128]u8 = undefined;
     const db = mkdb(&buf);
 
-    var r = try invoke(allocator, io, db, &.{ "aaa", "#prog" });
+    var r = try invoke(allocator, io, db, &.{ "aaa", "@prog" });
     allocator.free(r.stdout);
     allocator.free(r.stderr);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
@@ -65,7 +65,7 @@ test "bug1: --all groups items added with trailing #tag" {
     defer allocator.free(r.stderr);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
 
-    try std.testing.expect(std.mem.indexOf(u8, r.stdout, "#prog") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.stdout, "@prog") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.stdout, "aaa") != null);
 }
 
@@ -87,7 +87,7 @@ test "bug1b: --all groups items added with -t flag" {
     defer allocator.free(r.stderr);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
 
-    try std.testing.expect(std.mem.indexOf(u8, r.stdout, "#prog") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.stdout, "@prog") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.stdout, "aaa") != null);
 }
 
@@ -99,7 +99,7 @@ test "bug2: clear #tag only removes items with that tag" {
     var buf: [128]u8 = undefined;
     const db = mkdb(&buf);
 
-    var r = try invoke(allocator, io, db, &.{ "buy milk", "#prog" });
+    var r = try invoke(allocator, io, db, &.{ "buy milk", "@prog" });
     allocator.free(r.stdout);
     allocator.free(r.stderr);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
@@ -109,7 +109,7 @@ test "bug2: clear #tag only removes items with that tag" {
     allocator.free(r.stderr);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
 
-    r = try invoke(allocator, io, db, &.{ "clear", "#prog" });
+    r = try invoke(allocator, io, db, &.{ "clear", "@prog" });
     allocator.free(r.stdout);
     allocator.free(r.stderr);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
@@ -132,7 +132,7 @@ test "bug3: inline ##tag in a single quoted arg tags the item" {
     const db = mkdb(&buf);
 
     // Simulates: todo "call ##doctor for refill"
-    var r = try invoke(allocator, io, db, &.{"call ##doctor for refill"});
+    var r = try invoke(allocator, io, db, &.{"call @@doctor for refill"});
     allocator.free(r.stdout);
     allocator.free(r.stderr);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
@@ -154,7 +154,7 @@ test "bug4: ##tag among multiple args preserves all words in text" {
     const db = mkdb(&buf);
 
     // Simulates: todo call ##doctor fore refill  (4 separate args)
-    var r = try invoke(allocator, io, db, &.{ "call", "##doctor", "fore", "refill" });
+    var r = try invoke(allocator, io, db, &.{ "call", "@@doctor", "fore", "refill" });
     allocator.free(r.stdout);
     allocator.free(r.stderr);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
