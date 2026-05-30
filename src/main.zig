@@ -19,11 +19,16 @@ pub const Command = union(enum) {
     add: AddArgs,
     done: DoneArgs,
     clear: ClearArgs,
+    help,
 };
 
 pub fn classifyArgv(arena: std.mem.Allocator, argv: []const []const u8) (CliError || parse.ParseError)!Command {
     if (argv.len == 0) {
         return .{ .list = .{ .quiet = false, .all = false, .filter_tags = &.{} } };
+    }
+
+    if (std.mem.eql(u8, argv[0], "-h") or std.mem.eql(u8, argv[0], "--help")) {
+        return .help;
     }
 
     if (std.mem.eql(u8, argv[0], "done")) {
@@ -370,6 +375,28 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
 
+    if (cmd == .help) {
+        try stdout.writeStreamingAll(init.io,
+            \\usage: todo [options] [text [@tag...]]
+            \\
+            \\  todo                        list active todos
+            \\  todo -q                     silent if empty (for shellrc)
+            \\  todo -l <tag> [<tag>...]    filter by tag
+            \\  todo --all                  group by tag, plus [untagged]
+            \\  todo "text @tag1 @tag2"     add todo with trailing tags
+            \\  todo "text @@tag"           add todo with inline tag
+            \\  todo -t <tag> "text"        add todo with explicit tag
+            \\  todo done <id>              mark todo complete
+            \\  todo clear --all            delete all active todos
+            \\  todo clear @tag [@tag...]   delete todos with any listed tag
+            \\  todo -h, --help             show this help
+            \\
+            \\Tags match [A-Za-z0-9_-] and are normalized to lowercase.
+            \\
+        );
+        return;
+    }
+
     const path_raw = try todoPath(arena, init.environ_map);
     const path = try arena.dupeZ(u8, path_raw);
     try ensureParentDir(init.io, path);
@@ -402,6 +429,7 @@ pub fn main(init: std.process.Init) !void {
                 try stderr.writeStreamingAll(init.io, ebuf.items);
         },
         .clear => |c| try runClear(&s, c),
+        .help => unreachable,
     }
 }
 
