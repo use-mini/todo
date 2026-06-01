@@ -66,6 +66,18 @@ test "ColorMap.get: returns null for unknown tag" {
     try std.testing.expect(cm.get("missing") == null);
 }
 
+test "ColorMap.get: finds tag in multi-entry map" {
+    const entries = [_]TagColor{
+        .{ .tag = "alpha", .color = .{ .r = 1, .g = 2, .b = 3 } },
+        .{ .tag = "urgent", .color = .{ .r = 255, .g = 0, .b = 0 } },
+        .{ .tag = "zulu", .color = .{ .r = 0, .g = 0, .b = 255 } },
+    };
+    const cm = ColorMap{ .entries = &entries };
+    const col = cm.get("urgent");
+    try std.testing.expect(col != null);
+    try std.testing.expectEqual(@as(u8, 255), col.?.r);
+}
+
 test "writeTagColored: no entry writes plain @tag" {
     var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
     const cm = ColorMap{ .entries = &.{} };
