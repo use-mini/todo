@@ -6,12 +6,12 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "vendor",
         "README.md",
     },
     .dependencies = .{
         .sqlite = .{
-            .url = "https://www.sqlite.org/2024/sqlite-amalgamation-3460000.zip",
-            .hash = "N-V-__8AAMS2owAizDnIyqrH9UeU4ZO0vAF7sYU7x7vbOpgT",
+            .path = "vendor",
         },
     },
 }
