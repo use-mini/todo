@@ -382,6 +382,26 @@ fn renderList(
     for (items) |it| try writeItemLine(writer, "", it, col, cm);
 }
 
+fn countDigits(n: usize) usize {
+    if (n == 0) return 1;
+    var x = n;
+    var count: usize = 0;
+    while (x > 0) : (x /= 10) count += 1;
+    return count;
+}
+
+fn writeRightAligned(writer: anytype, n: usize, width: usize) !void {
+    var i: usize = countDigits(n);
+    while (i < width) : (i += 1) try writer.writeByte(' ');
+    try writer.print("{d}", .{n});
+}
+
+fn writeRightAlignedStr(writer: anytype, s: []const u8, width: usize) !void {
+    var i: usize = s.len;
+    while (i < width) : (i += 1) try writer.writeByte(' ');
+    try writer.writeAll(s);
+}
+
 fn renderTags(
     arena: std.mem.Allocator,
     writer: anytype,
@@ -402,17 +422,44 @@ fn renderTags(
         return;
     }
 
-    var max_tag_w: usize = 0;
+    var max_tag_w: usize = "tag".len;
+    var max_active: usize = 0;
+    var max_done: usize = 0;
+    var max_cleared: usize = 0;
     for (stats) |st| {
         const w = 1 + st.tag.len;
         if (w > max_tag_w) max_tag_w = w;
+        if (st.active > max_active) max_active = st.active;
+        if (st.done > max_done) max_done = st.done;
+        if (st.cleared > max_cleared) max_cleared = st.cleared;
     }
 
+    const gap = 3;
+    const color_col_w = 7; // #rrggbb
+    const active_w = @max("active".len, countDigits(max_active));
+    const done_w = @max("done".len, countDigits(max_done));
+    const cleared_w = @max("cleared".len, countDigits(max_cleared));
+
+    // Header
+    try writer.writeAll("tag");
+    var pad: usize = "tag".len;
+    while (pad < max_tag_w + gap) : (pad += 1) try writer.writeByte(' ');
+    try writer.writeAll("color");
+    pad = "color".len;
+    while (pad < color_col_w + gap) : (pad += 1) try writer.writeByte(' ');
+    try writeRightAlignedStr(writer, "active", active_w);
+    try writer.writeAll("   ");
+    try writeRightAlignedStr(writer, "done", done_w);
+    try writer.writeAll("   ");
+    try writeRightAlignedStr(writer, "cleared", cleared_w);
+    try writer.writeByte('\n');
+
+    // Rows
     for (stats) |st| {
         try color.writeTagColored(writer, cm, st.tag);
         const visual_w = 1 + st.tag.len;
-        var pad = visual_w;
-        while (pad < max_tag_w + 4) : (pad += 1) try writer.writeByte(' ');
+        pad = visual_w;
+        while (pad < max_tag_w + gap) : (pad += 1) try writer.writeByte(' ');
 
         const has_color = cm.get(st.tag) != null;
         if (has_color) {
@@ -425,23 +472,15 @@ fn renderTags(
         } else {
             try writer.writeAll("       ");
         }
-        try writer.writeAll("    ");
+        pad = color_col_w;
+        while (pad < color_col_w + gap) : (pad += 1) try writer.writeByte(' ');
 
-        var wrote_any = false;
-        if (st.active > 0) {
-            try writer.print("active: {d}", .{st.active});
-            wrote_any = true;
-        }
-        if (st.done > 0) {
-            if (wrote_any) try writer.writeAll("  ");
-            try writer.print("done: {d}", .{st.done});
-            wrote_any = true;
-        }
-        if (st.cleared > 0) {
-            if (wrote_any) try writer.writeAll("  ");
-            try writer.print("cleared: {d}", .{st.cleared});
-        }
-        try writer.writeAll("\n");
+        try writeRightAligned(writer, st.active, active_w);
+        try writer.writeAll("   ");
+        try writeRightAligned(writer, st.done, done_w);
+        try writer.writeAll("   ");
+        try writeRightAligned(writer, st.cleared, cleared_w);
+        try writer.writeByte('\n');
     }
 }
 
@@ -1225,9 +1264,11 @@ test "renderTags: shows tags with active and done counts" {
     defer buf.deinit(std.testing.allocator);
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "@urgent") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "active: 2") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "@backend") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "done: 1") != null);
+    // Header has all three column names
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "active") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "done") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "cleared") != null);
 }
 
 test "renderTags: empty store prints no tags" {

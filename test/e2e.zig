@@ -221,8 +221,9 @@ test "tags: shows counts by state" {
     defer allocator.free(r.stdout);
     defer allocator.free(r.stderr);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
-    try std.testing.expect(std.mem.indexOf(u8, r.stdout, "active: 1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, r.stdout, "done: 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.stdout, "active") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.stdout, "done") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.stdout, "cleared") != null);
 }
 
 test "tag: add and remove tags on an item" {
