@@ -82,6 +82,18 @@ const SCHEMA: [:0]const u8 =
     \\CREATE INDEX IF NOT EXISTS idx_item_tags_tag ON item_tags(tag);
 ;
 
+pub const Item = struct {
+    id: i64,
+    text: []const u8,
+    created_at: i64,
+    tags: [][]const u8,
+};
+
+pub const TagColorRaw = struct {
+    tag: []const u8,
+    color: []const u8,
+};
+
 pub const Store = struct {
     db: *c.sqlite3,
 
@@ -400,18 +412,6 @@ test "open + initSchema creates tables idempotently" {
     const third = std.mem.sliceTo(c.sqlite3_column_text(stmt, 0), 0);
     try std.testing.expectEqualStrings("tag_colors", third);
 }
-
-pub const Item = struct {
-    id: i64,
-    text: []const u8,
-    created_at: i64,
-    tags: [][]const u8,
-};
-
-pub const TagColorRaw = struct {
-    tag: []const u8,
-    color: []const u8,
-};
 
 test "add returns id; getById round-trips text and tags" {
     var s = try Store.open(":memory:");
