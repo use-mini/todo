@@ -435,6 +435,51 @@ pub const Store = struct {
         }
         return stats.items;
     }
+
+    pub fn updateItemTags(
+        self: *Store,
+        id: i64,
+        add_tags: []const []const u8,
+        remove_tags: []const []const u8,
+    ) StoreError!void {
+        const check = try prepare(self.db, "SELECT state FROM items WHERE id=?");
+        defer _ = c.sqlite3_finalize(check);
+        try bindInt(check, 1, id);
+        const rc = c.sqlite3_step(check);
+        if (rc == c.SQLITE_DONE) return StoreError.NotFound;
+        if (rc != c.SQLITE_ROW) return StoreError.StepFailed;
+        const state_ptr = c.sqlite3_column_text(check, 0);
+        if (!std.mem.eql(u8, std.mem.sliceTo(state_ptr, 0), "active")) return StoreError.NotActive;
+
+        try exec(self.db, "BEGIN");
+        errdefer _ = c.sqlite3_exec(self.db, "ROLLBACK", null, null, null);
+
+        if (remove_tags.len > 0) {
+            const del = try prepare(self.db,
+                "DELETE FROM item_tags WHERE item_id=? AND tag=?");
+            defer _ = c.sqlite3_finalize(del);
+            for (remove_tags) |tag| {
+                _ = c.sqlite3_reset(del);
+                try bindInt(del, 1, id);
+                try bindText(del, 2, tag);
+                if (c.sqlite3_step(del) != c.SQLITE_DONE) return StoreError.StepFailed;
+            }
+        }
+
+        if (add_tags.len > 0) {
+            const ins = try prepare(self.db,
+                "INSERT OR IGNORE INTO item_tags (item_id, tag) VALUES (?, ?)");
+            defer _ = c.sqlite3_finalize(ins);
+            for (add_tags) |tag| {
+                _ = c.sqlite3_reset(ins);
+                try bindInt(ins, 1, id);
+                try bindText(ins, 2, tag);
+                if (c.sqlite3_step(ins) != c.SQLITE_DONE) return StoreError.StepFailed;
+            }
+        }
+
+        try exec(self.db, "COMMIT");
+    }
 };
 
 test "open + initSchema creates tables idempotently" {
@@ -772,4 +817,62 @@ test "listAllTagStats: empty store returns empty slice" {
     defer arena_state.deinit();
     const stats = try s.listAllTagStats(arena_state.allocator());
     try std.testing.expectEqual(@as(usize, 0), stats.len);
+}
+
+test "updateItemTags: add a tag to an item" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    const id = try s.add("task", &.{});
+    try s.updateItemTags(id, &[_][]const u8{"urgent"}, &.{});
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const item = try s.getById(arena_state.allocator(), id);
+    try std.testing.expectEqual(@as(usize, 1), item.tags.len);
+    try std.testing.expectEqualStrings("urgent", item.tags[0]);
+}
+
+test "updateItemTags: remove a tag from an item" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    const id = try s.add("task", &[_][]const u8{"urgent"});
+    try s.updateItemTags(id, &.{}, &[_][]const u8{"urgent"});
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const item = try s.getById(arena_state.allocator(), id);
+    try std.testing.expectEqual(@as(usize, 0), item.tags.len);
+}
+
+test "updateItemTags: adding existing tag is a no-op (idempotent)" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    const id = try s.add("task", &[_][]const u8{"urgent"});
+    try s.updateItemTags(id, &[_][]const u8{"urgent"}, &.{});
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const item = try s.getById(arena_state.allocator(), id);
+    try std.testing.expectEqual(@as(usize, 1), item.tags.len);
+}
+
+test "updateItemTags: not found returns NotFound" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    try std.testing.expectError(StoreError.NotFound,
+        s.updateItemTags(999, &[_][]const u8{"urgent"}, &.{}));
+}
+
+test "updateItemTags: completed item returns NotActive" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    const id = try s.add("task", &.{});
+    try s.markCompleted(id, null);
+    try std.testing.expectError(StoreError.NotActive,
+        s.updateItemTags(id, &[_][]const u8{"urgent"}, &.{}));
 }
