@@ -73,6 +73,10 @@ const SCHEMA: [:0]const u8 =
     \\    tag     TEXT    NOT NULL,
     \\    PRIMARY KEY (item_id, tag)
     \\);
+    \\CREATE TABLE IF NOT EXISTS tag_colors (
+    \\    tag   TEXT PRIMARY KEY,
+    \\    color TEXT NOT NULL
+    \\);
     \\CREATE INDEX IF NOT EXISTS idx_items_state   ON items(state);
     \\CREATE INDEX IF NOT EXISTS idx_item_tags_tag ON item_tags(tag);
 ;
@@ -96,6 +100,10 @@ pub const Store = struct {
 
     pub fn initSchema(self: *Store) StoreError!void {
         try exec(self.db, SCHEMA);
+        // NOTE: ignored when column already exists (idempotent migration)
+        _ = c.sqlite3_exec(self.db,
+            "ALTER TABLE items ADD COLUMN completion_note TEXT",
+            null, null, null);
     }
 
     pub fn add(self: *Store, text: []const u8, tags: []const []const u8) StoreError!i64 {
@@ -315,7 +323,7 @@ test "open + initSchema creates tables idempotently" {
     try s.initSchema();
 
     var stmt: ?*c.sqlite3_stmt = null;
-    const sql = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name";
+    const sql = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name";
     try std.testing.expectEqual(@as(c_int, c.SQLITE_OK),
         c.sqlite3_prepare_v2(s.db, sql, -1, &stmt, null));
     defer _ = c.sqlite3_finalize(stmt);
@@ -327,6 +335,10 @@ test "open + initSchema creates tables idempotently" {
     try std.testing.expectEqual(@as(c_int, c.SQLITE_ROW), c.sqlite3_step(stmt));
     const second = std.mem.sliceTo(c.sqlite3_column_text(stmt, 0), 0);
     try std.testing.expectEqualStrings("items", second);
+
+    try std.testing.expectEqual(@as(c_int, c.SQLITE_ROW), c.sqlite3_step(stmt));
+    const third = std.mem.sliceTo(c.sqlite3_column_text(stmt, 0), 0);
+    try std.testing.expectEqualStrings("tag_colors", third);
 }
 
 pub const Item = struct {
@@ -459,4 +471,41 @@ test "clearActive transitions every active item; clearActiveByTags scopes by tag
     // both are no-ops on an empty active set
     try std.testing.expectEqual(@as(usize, 0), try s.clearActive());
     try std.testing.expectEqual(@as(usize, 0), try s.clearActiveByTags(&[_][]const u8{"urgent"}));
+}
+
+test "initSchema creates tag_colors table" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+
+    var stmt: ?*c.sqlite3_stmt = null;
+    const sql = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name";
+    try std.testing.expectEqual(@as(c_int, c.SQLITE_OK),
+        c.sqlite3_prepare_v2(s.db, sql, -1, &stmt, null));
+    defer _ = c.sqlite3_finalize(stmt);
+
+    try std.testing.expectEqual(@as(c_int, c.SQLITE_ROW), c.sqlite3_step(stmt));
+    try std.testing.expectEqualStrings("item_tags",
+        std.mem.sliceTo(c.sqlite3_column_text(stmt, 0), 0));
+    try std.testing.expectEqual(@as(c_int, c.SQLITE_ROW), c.sqlite3_step(stmt));
+    try std.testing.expectEqualStrings("items",
+        std.mem.sliceTo(c.sqlite3_column_text(stmt, 0), 0));
+    try std.testing.expectEqual(@as(c_int, c.SQLITE_ROW), c.sqlite3_step(stmt));
+    try std.testing.expectEqualStrings("tag_colors",
+        std.mem.sliceTo(c.sqlite3_column_text(stmt, 0), 0));
+}
+
+test "initSchema: completion_note column exists after init" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    try s.initSchema(); // second call must not error
+
+    const id = try s.add("task", &.{});
+    var stmt: ?*c.sqlite3_stmt = null;
+    _ = c.sqlite3_prepare_v2(s.db, "SELECT completion_note FROM items WHERE id=?", -1, &stmt, null);
+    defer _ = c.sqlite3_finalize(stmt);
+    _ = c.sqlite3_bind_int64(stmt, 1, id);
+    try std.testing.expectEqual(@as(c_int, c.SQLITE_ROW), c.sqlite3_step(stmt));
+    try std.testing.expectEqual(@as(c_int, c.SQLITE_NULL), c.sqlite3_column_type(stmt, 0));
 }
