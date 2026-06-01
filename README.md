@@ -20,9 +20,15 @@ todo --all                        group active todos by tag, plus [untagged]
 todo "text @tag1 @tag2"           add; trailing @tags are extracted
 todo "call @@doctor for refill"   inline tag: stored as "@doctor", tag = doctor
 todo -t urgent "text"             add with explicit tag (repeatable)
-todo done <id>                    mark complete (use the id shown in listings)
+todo done <id> [note]             mark complete; optional note is stored
 todo clear --all                  soft-delete all active items
 todo clear @tag [@tag...]         soft-delete active items having any listed tag
+todo clear <id>                   soft-delete one active item by id
+todo tag <id> +@tag -@tag         add/remove tags on an active item (repeatable)
+todo tags                         list all tags with counts by state
+todo color @tag #rrggbb           set a display color for a tag
+todo color @tag                   unset display color for a tag
+todo colors <file>                bulk-load tag colors from a file
 ```
 
 Tags are case-insensitive and normalized to lowercase. They must match `[A-Za-z0-9_-]+`.
@@ -33,6 +39,41 @@ Listings show tags aligned to a pipe separator:
 1. call the lab      | @urgent
 2. buy milk          | @errand @quick
 3. read the docs
+```
+
+### Tag colors
+
+Assign a 24-bit RGB color to any tag so it appears highlighted in listings and the tags table:
+
+```
+todo color @urgent #ff0000
+```
+
+To load colors for several tags at once, put them in a plain text file — one `tag=#rrggbb` entry per line — and run:
+
+```
+todo colors mycolors.txt
+```
+
+Example file:
+
+```
+urgent=#ff0000
+work=#5599ff
+shopping=#00cc66
+```
+
+Empty lines are ignored. Tags are normalized (leading `@` is optional, name is lowercased).
+
+### Tags table
+
+`todo tags` prints a summary table of every tag that has ever appeared, with item counts broken down by state:
+
+```
+  tag    |  color  | active | done | cleared
+---------|---------|--------|------|--------
+@urgent  | #ff0000 |   3    |  1   |    0
+@work    | #5599ff |   1    |  0   |    2
 ```
 
 ## Shell integration
