@@ -8,18 +8,30 @@ pub const CliError = error{
     InvalidTag,
     EmptyText,
     NotAnId,
+    InvalidColor,
 };
 
 pub const ListArgs = struct { quiet: bool, all: bool, filter_tags: []const []const u8 };
 pub const AddArgs = struct { text: []const u8, tags: []const []const u8 };
 pub const DoneArgs = struct { id: i64, note: ?[]const u8 = null };
 pub const ClearArgs = struct { filter_tags: []const []const u8, all: bool = false, id: ?i64 = null };
+pub const TagEditArgs = struct {
+    id: i64,
+    add_tags: []const []const u8,
+    remove_tags: []const []const u8,
+};
+pub const ColorSetArgs = struct { tag: []const u8, color: []const u8 };
+pub const ColorUnsetArgs = struct { tag: []const u8 };
 
 pub const Command = union(enum) {
     list: ListArgs,
     add: AddArgs,
     done: DoneArgs,
     clear: ClearArgs,
+    tag_edit: TagEditArgs,
+    color_set: ColorSetArgs,
+    color_unset: ColorUnsetArgs,
+    tags_list,
     help,
 };
 
@@ -64,6 +76,45 @@ pub fn classifyArgv(arena: std.mem.Allocator, argv: []const []const u8) (CliErro
             }
         }
         return .{ .clear = .{ .filter_tags = tags.items, .all = all, .id = null } };
+    }
+
+    if (std.mem.eql(u8, argv[0], "color")) {
+        if (argv.len < 2) return CliError.UsageError;
+        const tag = try parse.normalizeFilterTag(arena, argv[1]);
+        if (argv.len == 2) return .{ .color_unset = .{ .tag = tag } };
+        if (argv.len == 3) {
+            _ = color.parseHex(argv[2]) catch return CliError.InvalidColor;
+            return .{ .color_set = .{ .tag = tag, .color = argv[2] } };
+        }
+        return CliError.UsageError;
+    }
+
+    if (std.mem.eql(u8, argv[0], "tags")) {
+        if (argv.len != 1) return CliError.UsageError;
+        return .tags_list;
+    }
+
+    if (std.mem.eql(u8, argv[0], "tag")) {
+        if (argv.len < 3) return CliError.UsageError;
+        const id = std.fmt.parseInt(i64, argv[1], 10) catch return CliError.NotAnId;
+        var add_tags: std.ArrayList([]const u8) = .empty;
+        var remove_tags: std.ArrayList([]const u8) = .empty;
+        for (argv[2..]) |tok| {
+            if (tok.len >= 3 and tok[0] == '+' and tok[1] == '@') {
+                const norm = try parse.normalizeFilterTag(arena, tok[2..]);
+                add_tags.append(arena, norm) catch return CliError.UsageError;
+            } else if (tok.len >= 3 and tok[0] == '-' and tok[1] == '@') {
+                const norm = try parse.normalizeFilterTag(arena, tok[2..]);
+                remove_tags.append(arena, norm) catch return CliError.UsageError;
+            } else {
+                return CliError.UsageError;
+            }
+        }
+        return .{ .tag_edit = .{
+            .id = id,
+            .add_tags = add_tags.items,
+            .remove_tags = remove_tags.items,
+        } };
     }
 
     var quiet = false;
@@ -379,6 +430,30 @@ fn runClear(s: *store.Store, cmd: ClearArgs, err_writer: anytype) !void {
     }
 }
 
+fn runColorSet(s: *store.Store, cmd: ColorSetArgs) !void {
+    try s.setTagColor(cmd.tag, cmd.color);
+}
+
+fn runColorUnset(s: *store.Store, cmd: ColorUnsetArgs) !void {
+    try s.removeTagColor(cmd.tag);
+}
+
+fn runTagEdit(s: *store.Store, cmd: TagEditArgs, err_writer: anytype) !void {
+    s.updateItemTags(cmd.id, cmd.add_tags, cmd.remove_tags) catch |err| switch (err) {
+        store.StoreError.NotFound => {
+            var buf: [128]u8 = undefined;
+            const msg = try std.fmt.bufPrint(&buf, "no todo with id {d}\n", .{cmd.id});
+            try err_writer.writeAll(msg);
+        },
+        store.StoreError.NotActive => {
+            var buf: [128]u8 = undefined;
+            const msg = try std.fmt.bufPrint(&buf, "todo {d} is not active\n", .{cmd.id});
+            try err_writer.writeAll(msg);
+        },
+        else => return err,
+    };
+}
+
 fn ensureParentDir(io: std.Io, path: []const u8) !void {
     const dir = std.fs.path.dirname(path) orelse return;
     std.Io.Dir.cwd().createDirPath(io, dir) catch {};
@@ -401,6 +476,7 @@ pub fn main(init: std.process.Init) !void {
             error.UsageError, error.NotAnId => try stderr.writeStreamingAll(init.io, "usage error\n"),
             error.InvalidTag => try stderr.writeStreamingAll(init.io, "invalid tag: use [A-Za-z0-9_-]\n"),
             error.EmptyText => try stderr.writeStreamingAll(init.io, "cannot add an empty todo\n"),
+            error.InvalidColor => try stderr.writeStreamingAll(init.io, "invalid color: use #rrggbb\n"),
         }
         std.process.exit(1);
     };
@@ -466,6 +542,17 @@ pub fn main(init: std.process.Init) !void {
             if (ebuf.items.len > 0)
                 try stderr.writeStreamingAll(init.io, ebuf.items);
         },
+        .color_set => |cs| try runColorSet(&s, cs),
+        .color_unset => |cu| try runColorUnset(&s, cu),
+        .tag_edit => |te| {
+            var ew = std.Io.Writer.Allocating.init(arena);
+            defer ew.deinit();
+            try runTagEdit(&s, te, &ew.writer);
+            const ebuf = ew.toArrayList();
+            if (ebuf.items.len > 0)
+                try stderr.writeStreamingAll(init.io, ebuf.items);
+        },
+        .tags_list => {},
         .help => unreachable,
     }
 }
@@ -909,4 +996,117 @@ test "runClear: clear by id on completed prints warning" {
     var buf = ew.toArrayList();
     defer buf.deinit(std.testing.allocator);
     try std.testing.expect(std.mem.endsWith(u8, buf.items, "is not active\n"));
+}
+
+test "classifyArgv: color @tag #hex sets color" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const cmd = try classifyArgv(arena, &[_][]const u8{ "color", "@urgent", "#ff5500" });
+    try std.testing.expect(cmd == .color_set);
+    try std.testing.expectEqualStrings("urgent", cmd.color_set.tag);
+    try std.testing.expectEqualStrings("#ff5500", cmd.color_set.color);
+}
+
+test "classifyArgv: color @tag alone unsets" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const cmd = try classifyArgv(arena, &[_][]const u8{ "color", "@urgent" });
+    try std.testing.expect(cmd == .color_unset);
+    try std.testing.expectEqualStrings("urgent", cmd.color_unset.tag);
+}
+
+test "classifyArgv: color with bad hex returns InvalidColor" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try std.testing.expectError(CliError.InvalidColor,
+        classifyArgv(arena, &[_][]const u8{ "color", "@urgent", "notahex" }));
+}
+
+test "classifyArgv: tags returns tags_list" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const cmd = try classifyArgv(arena, &[_][]const u8{"tags"});
+    try std.testing.expect(cmd == .tags_list);
+}
+
+test "classifyArgv: tag <id> +@foo -@bar" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const cmd = try classifyArgv(arena, &[_][]const u8{ "tag", "3", "+@urgent", "-@backend" });
+    try std.testing.expect(cmd == .tag_edit);
+    try std.testing.expectEqual(@as(i64, 3), cmd.tag_edit.id);
+    try std.testing.expectEqual(@as(usize, 1), cmd.tag_edit.add_tags.len);
+    try std.testing.expectEqualStrings("urgent", cmd.tag_edit.add_tags[0]);
+    try std.testing.expectEqual(@as(usize, 1), cmd.tag_edit.remove_tags.len);
+    try std.testing.expectEqualStrings("backend", cmd.tag_edit.remove_tags[0]);
+}
+
+test "classifyArgv: tag with no ops is usage error" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try std.testing.expectError(CliError.UsageError,
+        classifyArgv(arena, &[_][]const u8{ "tag", "3" }));
+}
+
+test "runColorSet: stores color in db" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    try runColorSet(&s, .{ .tag = "urgent", .color = "#ff5500" });
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const colors = try s.listTagColors(arena_state.allocator());
+    try std.testing.expectEqual(@as(usize, 1), colors.len);
+    try std.testing.expectEqualStrings("#ff5500", colors[0].color);
+}
+
+test "runColorUnset: removes color from db" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    try s.setTagColor("urgent", "#ff5500");
+    try runColorUnset(&s, .{ .tag = "urgent" });
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const colors = try s.listTagColors(arena_state.allocator());
+    try std.testing.expectEqual(@as(usize, 0), colors.len);
+}
+
+test "runTagEdit: adds and removes tags" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    const id = try s.add("task", &[_][]const u8{"old"});
+
+    var ew = std.Io.Writer.Allocating.init(std.testing.allocator);
+    try runTagEdit(&s, .{ .id = id, .add_tags = &[_][]const u8{"new"}, .remove_tags = &[_][]const u8{"old"} }, &ew.writer);
+    var buf = ew.toArrayList();
+    defer buf.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("", buf.items);
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const item = try s.getById(arena_state.allocator(), id);
+    try std.testing.expectEqual(@as(usize, 1), item.tags.len);
+    try std.testing.expectEqualStrings("new", item.tags[0]);
+}
+
+test "runTagEdit: unknown id prints warning" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+
+    var ew = std.Io.Writer.Allocating.init(std.testing.allocator);
+    try runTagEdit(&s, .{ .id = 999, .add_tags = &[_][]const u8{"x"}, .remove_tags = &.{} }, &ew.writer);
+    var buf = ew.toArrayList();
+    defer buf.deinit(std.testing.allocator);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "999") != null);
 }
