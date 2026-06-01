@@ -562,9 +562,14 @@ pub fn main(init: std.process.Init) !void {
             \\  todo "text @tag1 @tag2"     add todo with trailing tags
             \\  todo "text @@tag"           add todo with inline tag
             \\  todo -t <tag> "text"        add todo with explicit tag
-            \\  todo done <id>              mark todo complete
+            \\  todo done <id> [note]       mark todo complete with optional note
             \\  todo clear --all            delete all active todos
             \\  todo clear @tag [@tag...]   delete todos with any listed tag
+            \\  todo clear <id>             delete one active todo by id
+            \\  todo tag <id> +@tag -@tag   add/remove tags on an active todo
+            \\  todo color @tag #rrggbb     set display color for a tag
+            \\  todo color @tag             unset display color for a tag
+            \\  todo tags                   list all tags with usage counts
             \\  todo -h, --help             show this help
             \\
             \\Tags match [A-Za-z0-9_-] and are normalized to lowercase.
