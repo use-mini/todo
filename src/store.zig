@@ -29,6 +29,7 @@ pub const StoreError = error{
     OutOfMemory,
     NotFound,
     AlreadyDone,
+    NotActive,
 };
 
 fn exec(db: *c.sqlite3, sql: [:0]const u8) StoreError!void {
@@ -319,6 +320,26 @@ pub const Store = struct {
         if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return StoreError.StepFailed;
         return @intCast(c.sqlite3_changes(self.db));
     }
+
+    pub fn clearById(self: *Store, id: i64) StoreError!void {
+        const check = try prepare(self.db, "SELECT state FROM items WHERE id=?");
+        defer _ = c.sqlite3_finalize(check);
+        try bindInt(check, 1, id);
+        const rc = c.sqlite3_step(check);
+        if (rc == c.SQLITE_DONE) return StoreError.NotFound;
+        if (rc != c.SQLITE_ROW) return StoreError.StepFailed;
+        const state_ptr = c.sqlite3_column_text(check, 0);
+        if (!std.mem.eql(u8, std.mem.sliceTo(state_ptr, 0), "active")) return StoreError.NotActive;
+
+        const stmt = try prepare(self.db,
+            "UPDATE items SET state='cleared', cleared_at=? WHERE id=?");
+        defer _ = c.sqlite3_finalize(stmt);
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.REALTIME, &ts);
+        try bindInt(stmt, 1, ts.sec);
+        try bindInt(stmt, 2, id);
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return StoreError.StepFailed;
+    }
 };
 
 test "open + initSchema creates tables idempotently" {
@@ -544,4 +565,33 @@ test "markCompleted with null note stores NULL" {
     _ = c.sqlite3_bind_int64(stmt, 1, id);
     _ = c.sqlite3_step(stmt);
     try std.testing.expectEqual(@as(c_int, c.SQLITE_NULL), c.sqlite3_column_type(stmt, 0));
+}
+
+test "clearById clears an active item" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    const id = try s.add("task", &.{});
+    try s.clearById(id);
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const items = try s.listActive(arena_state.allocator());
+    try std.testing.expectEqual(@as(usize, 0), items.len);
+}
+
+test "clearById: not found returns NotFound" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    try std.testing.expectError(StoreError.NotFound, s.clearById(999));
+}
+
+test "clearById: completed item returns NotActive" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    const id = try s.add("task", &.{});
+    try s.markCompleted(id, null);
+    try std.testing.expectError(StoreError.NotActive, s.clearById(id));
 }

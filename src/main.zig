@@ -13,7 +13,7 @@ pub const CliError = error{
 pub const ListArgs = struct { quiet: bool, all: bool, filter_tags: []const []const u8 };
 pub const AddArgs = struct { text: []const u8, tags: []const []const u8 };
 pub const DoneArgs = struct { id: i64, note: ?[]const u8 = null };
-pub const ClearArgs = struct { filter_tags: []const []const u8, all: bool = false };
+pub const ClearArgs = struct { filter_tags: []const []const u8, all: bool = false, id: ?i64 = null };
 
 pub const Command = union(enum) {
     list: ListArgs,
@@ -47,6 +47,11 @@ pub fn classifyArgv(arena: std.mem.Allocator, argv: []const []const u8) (CliErro
     }
 
     if (std.mem.eql(u8, argv[0], "clear")) {
+        if (argv.len == 2) {
+            if (std.fmt.parseInt(i64, argv[1], 10) catch null) |id| {
+                return .{ .clear = .{ .filter_tags = &.{}, .all = false, .id = id } };
+            }
+        }
         var all = false;
         var tags: std.ArrayList([]const u8) = .empty;
         var i: usize = 1;
@@ -58,7 +63,7 @@ pub fn classifyArgv(arena: std.mem.Allocator, argv: []const []const u8) (CliErro
                 tags.append(arena, norm) catch return CliError.UsageError;
             }
         }
-        return .{ .clear = .{ .filter_tags = tags.items, .all = all } };
+        return .{ .clear = .{ .filter_tags = tags.items, .all = all, .id = null } };
     }
 
     var quiet = false;
@@ -349,7 +354,23 @@ fn runDone(s: *store.Store, cmd: DoneArgs, err_writer: anytype) !void {
     };
 }
 
-fn runClear(s: *store.Store, cmd: ClearArgs) !void {
+fn runClear(s: *store.Store, cmd: ClearArgs, err_writer: anytype) !void {
+    if (cmd.id) |id| {
+        s.clearById(id) catch |err| switch (err) {
+            store.StoreError.NotFound => {
+                var buf: [128]u8 = undefined;
+                const msg = try std.fmt.bufPrint(&buf, "no todo with id {d}\n", .{id});
+                try err_writer.writeAll(msg);
+            },
+            store.StoreError.NotActive => {
+                var buf: [128]u8 = undefined;
+                const msg = try std.fmt.bufPrint(&buf, "todo {d} is not active\n", .{id});
+                try err_writer.writeAll(msg);
+            },
+            else => return err,
+        };
+        return;
+    }
     if (cmd.filter_tags.len == 0 and !cmd.all) return;
     if (cmd.filter_tags.len == 0) {
         _ = try s.clearActive();
@@ -437,7 +458,14 @@ pub fn main(init: std.process.Init) !void {
             if (ebuf.items.len > 0)
                 try stderr.writeStreamingAll(init.io, ebuf.items);
         },
-        .clear => |c| try runClear(&s, c),
+        .clear => |c| {
+            var ew = std.Io.Writer.Allocating.init(arena);
+            defer ew.deinit();
+            try runClear(&s, c, &ew.writer);
+            const ebuf = ew.toArrayList();
+            if (ebuf.items.len > 0)
+                try stderr.writeStreamingAll(init.io, ebuf.items);
+        },
         .help => unreachable,
     }
 }
@@ -657,7 +685,9 @@ test "runClear: --all clears all active todos" {
     try s.initSchema();
     _ = try s.add("task one", &.{});
     _ = try s.add("task two", &.{"work"});
-    try runClear(&s, .{ .filter_tags = &.{}, .all = true });
+    var ew = std.Io.Writer.Allocating.init(std.testing.allocator);
+    try runClear(&s, .{ .filter_tags = &.{}, .all = true }, &ew.writer);
+    _ = ew.toArrayList();
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const items = try s.listActive(arena_state.allocator());
@@ -670,7 +700,8 @@ test "runClear: clears only matching tagged todos" {
     try s.initSchema();
     _ = try s.add("task one", &.{"work"});
     _ = try s.add("task two", &.{"personal"});
-    try runClear(&s, .{ .filter_tags = &.{"work"} });
+    var ew = std.Io.Writer.Allocating.init(std.testing.allocator);
+    try runClear(&s, .{ .filter_tags = &.{"work"} }, &ew.writer);
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const items = try s.listActive(arena_state.allocator());
@@ -684,7 +715,8 @@ test "runClear: no filter and no --all is a no-op, prevents accidental deletion"
     try s.initSchema();
     _ = try s.add("task one", &.{"work"});
     _ = try s.add("task two", &.{});
-    try runClear(&s, .{ .filter_tags = &.{}, .all = false });
+    var ew = std.Io.Writer.Allocating.init(std.testing.allocator);
+    try runClear(&s, .{ .filter_tags = &.{}, .all = false }, &ew.writer);
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const items = try s.listActive(arena_state.allocator());
@@ -695,7 +727,8 @@ test "runClear: empty store with --all is a no-op" {
     var s = try store.Store.open(":memory:");
     defer s.close();
     try s.initSchema();
-    try runClear(&s, .{ .filter_tags = &.{}, .all = true });
+    var ew = std.Io.Writer.Allocating.init(std.testing.allocator);
+    try runClear(&s, .{ .filter_tags = &.{}, .all = true }, &ew.writer);
 }
 
 test "renderList: single -l shows a flat list with no header" {
@@ -831,4 +864,49 @@ test "classifyArgv: done without note has null note" {
     const cmd = try classifyArgv(arena, &[_][]const u8{ "done", "5" });
     try std.testing.expect(cmd == .done);
     try std.testing.expect(cmd.done.note == null);
+}
+
+test "classifyArgv: clear <id> sets id field" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const cmd = try classifyArgv(arena, &[_][]const u8{ "clear", "7" });
+    try std.testing.expect(cmd == .clear);
+    try std.testing.expectEqual(@as(?i64, 7), cmd.clear.id);
+    try std.testing.expectEqual(@as(usize, 0), cmd.clear.filter_tags.len);
+    try std.testing.expect(!cmd.clear.all);
+}
+
+test "runClear: clear by id clears one item" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    const id = try s.add("task one", &.{});
+    _ = try s.add("task two", &.{});
+
+    var ew = std.Io.Writer.Allocating.init(std.testing.allocator);
+    try runClear(&s, .{ .filter_tags = &.{}, .id = id }, &ew.writer);
+    var buf = ew.toArrayList();
+    defer buf.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("", buf.items);
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const items = try s.listActive(arena_state.allocator());
+    try std.testing.expectEqual(@as(usize, 1), items.len);
+    try std.testing.expectEqualStrings("task two", items[0].text);
+}
+
+test "runClear: clear by id on completed prints warning" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    const id = try s.add("task", &.{});
+    try s.markCompleted(id, null);
+
+    var ew = std.Io.Writer.Allocating.init(std.testing.allocator);
+    try runClear(&s, .{ .filter_tags = &.{}, .id = id }, &ew.writer);
+    var buf = ew.toArrayList();
+    defer buf.deinit(std.testing.allocator);
+    try std.testing.expect(std.mem.endsWith(u8, buf.items, "is not active\n"));
 }
