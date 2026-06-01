@@ -170,3 +170,124 @@ test "bug4: ##tag among multiple args preserves all words in text" {
     // item must be tagged with doctor
     try std.testing.expect(std.mem.indexOf(u8, r.stdout, "doctor") != null);
 }
+
+test "color: set and unset tag color" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var buf: [128]u8 = undefined;
+    const db = mkdb(&buf);
+
+    // add a tagged item
+    var r = try invoke(allocator, io, db, &.{ "buy milk", "@urgent" });
+    allocator.free(r.stdout);
+    allocator.free(r.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
+
+    // set color
+    r = try invoke(allocator, io, db, &.{ "color", "@urgent", "#ff5500" });
+    allocator.free(r.stdout);
+    allocator.free(r.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
+
+    // tags shows the hex value
+    r = try invoke(allocator, io, db, &.{"tags"});
+    defer allocator.free(r.stdout);
+    defer allocator.free(r.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
+    try std.testing.expect(std.mem.indexOf(u8, r.stdout, "#ff5500") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.stdout, "urgent") != null);
+}
+
+test "tags: shows counts by state" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var buf: [128]u8 = undefined;
+    const db = mkdb(&buf);
+
+    var r = try invoke(allocator, io, db, &.{ "task a", "@work" });
+    allocator.free(r.stdout);
+    allocator.free(r.stderr);
+    r = try invoke(allocator, io, db, &.{ "task b", "@work" });
+    allocator.free(r.stdout);
+    allocator.free(r.stderr);
+
+    // mark one done
+    r = try invoke(allocator, io, db, &.{ "done", "1" });
+    allocator.free(r.stdout);
+    allocator.free(r.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
+
+    r = try invoke(allocator, io, db, &.{"tags"});
+    defer allocator.free(r.stdout);
+    defer allocator.free(r.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
+    try std.testing.expect(std.mem.indexOf(u8, r.stdout, "active: 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.stdout, "done: 1") != null);
+}
+
+test "tag: add and remove tags on an item" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var buf: [128]u8 = undefined;
+    const db = mkdb(&buf);
+
+    var r = try invoke(allocator, io, db, &.{ "fix bug", "@backend" });
+    allocator.free(r.stdout);
+    allocator.free(r.stderr);
+
+    // add urgent, remove backend
+    r = try invoke(allocator, io, db, &.{ "tag", "1", "+@urgent", "-@backend" });
+    allocator.free(r.stdout);
+    allocator.free(r.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
+
+    r = try invoke(allocator, io, db, &.{});
+    defer allocator.free(r.stdout);
+    defer allocator.free(r.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
+    try std.testing.expect(std.mem.indexOf(u8, r.stdout, "urgent") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.stdout, "backend") == null);
+}
+
+test "clear <id>: clears a single item by id" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var buf: [128]u8 = undefined;
+    const db = mkdb(&buf);
+
+    var r = try invoke(allocator, io, db, &.{"keep me"});
+    allocator.free(r.stdout);
+    allocator.free(r.stderr);
+    r = try invoke(allocator, io, db, &.{"delete me"});
+    allocator.free(r.stdout);
+    allocator.free(r.stderr);
+
+    r = try invoke(allocator, io, db, &.{ "clear", "2" });
+    allocator.free(r.stdout);
+    allocator.free(r.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
+
+    r = try invoke(allocator, io, db, &.{});
+    defer allocator.free(r.stdout);
+    defer allocator.free(r.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
+    try std.testing.expect(std.mem.indexOf(u8, r.stdout, "keep me") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.stdout, "delete me") == null);
+}
+
+test "done <id> note: stores note without error" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var buf: [128]u8 = undefined;
+    const db = mkdb(&buf);
+
+    var r = try invoke(allocator, io, db, &.{"ship feature"});
+    allocator.free(r.stdout);
+    allocator.free(r.stderr);
+
+    r = try invoke(allocator, io, db, &.{ "done", "1", "deployed", "to", "prod" });
+    defer allocator.free(r.stdout);
+    defer allocator.free(r.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
+    try std.testing.expectEqualStrings("", r.stderr);
+}
