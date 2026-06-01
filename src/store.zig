@@ -94,6 +94,13 @@ pub const TagColorRaw = struct {
     color: []const u8,
 };
 
+pub const TagStat = struct {
+    tag: []const u8,
+    active: usize,
+    done: usize,
+    cleared: usize,
+};
+
 pub const Store = struct {
     db: *c.sqlite3,
 
@@ -385,6 +392,48 @@ pub const Store = struct {
             result.append(arena, .{ .tag = tag_dup, .color = color_dup }) catch return StoreError.OutOfMemory;
         }
         return result.items;
+    }
+
+    pub fn listAllTagStats(self: *Store, arena: std.mem.Allocator) StoreError![]TagStat {
+        const sel = try prepare(self.db,
+            \\SELECT t.tag, i.state, COUNT(*) as cnt
+            \\FROM item_tags t
+            \\JOIN items i ON i.id = t.item_id
+            \\GROUP BY t.tag, i.state
+            \\ORDER BY t.tag
+        );
+        defer _ = c.sqlite3_finalize(sel);
+
+        var stats: std.ArrayList(TagStat) = .empty;
+        while (true) {
+            const rc = c.sqlite3_step(sel);
+            if (rc == c.SQLITE_DONE) break;
+            if (rc != c.SQLITE_ROW) return StoreError.StepFailed;
+
+            const tag_s = std.mem.sliceTo(c.sqlite3_column_text(sel, 0), 0);
+            const state_s = std.mem.sliceTo(c.sqlite3_column_text(sel, 1), 0);
+            const cnt: usize = @intCast(c.sqlite3_column_int64(sel, 2));
+
+            var found = false;
+            for (stats.items) |*st| {
+                if (std.mem.eql(u8, st.tag, tag_s)) {
+                    if (std.mem.eql(u8, state_s, "active")) st.active += cnt;
+                    if (std.mem.eql(u8, state_s, "completed")) st.done += cnt;
+                    if (std.mem.eql(u8, state_s, "cleared")) st.cleared += cnt;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                const tag_dup = arena.dupe(u8, tag_s) catch return StoreError.OutOfMemory;
+                var st = TagStat{ .tag = tag_dup, .active = 0, .done = 0, .cleared = 0 };
+                if (std.mem.eql(u8, state_s, "active")) st.active = cnt;
+                if (std.mem.eql(u8, state_s, "completed")) st.done = cnt;
+                if (std.mem.eql(u8, state_s, "cleared")) st.cleared = cnt;
+                stats.append(arena, st) catch return StoreError.OutOfMemory;
+            }
+        }
+        return stats.items;
     }
 };
 
@@ -684,4 +733,43 @@ test "removeTagColor on nonexistent tag is a no-op" {
     defer s.close();
     try s.initSchema();
     try s.removeTagColor("missing");
+}
+
+test "listAllTagStats returns counts by state across all items" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+
+    _ = try s.add("a", &[_][]const u8{"urgent"});
+    _ = try s.add("b", &[_][]const u8{"urgent"});
+    const id3 = try s.add("c", &[_][]const u8{"backend"});
+    try s.markCompleted(id3, null);
+    const id4 = try s.add("d", &[_][]const u8{"urgent"});
+    _ = try s.clearById(id4);
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const stats = try s.listAllTagStats(arena_state.allocator());
+
+    try std.testing.expectEqual(@as(usize, 2), stats.len);
+    // sorted alphabetically: backend, urgent
+    try std.testing.expectEqualStrings("backend", stats[0].tag);
+    try std.testing.expectEqual(@as(usize, 0), stats[0].active);
+    try std.testing.expectEqual(@as(usize, 1), stats[0].done);
+    try std.testing.expectEqual(@as(usize, 0), stats[0].cleared);
+
+    try std.testing.expectEqualStrings("urgent", stats[1].tag);
+    try std.testing.expectEqual(@as(usize, 2), stats[1].active);
+    try std.testing.expectEqual(@as(usize, 0), stats[1].done);
+    try std.testing.expectEqual(@as(usize, 1), stats[1].cleared);
+}
+
+test "listAllTagStats: empty store returns empty slice" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const stats = try s.listAllTagStats(arena_state.allocator());
+    try std.testing.expectEqual(@as(usize, 0), stats.len);
 }
