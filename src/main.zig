@@ -546,7 +546,7 @@ pub fn main(init: std.process.Init) !void {
             error.UsageError, error.NotAnId => try stderr.writeStreamingAll(init.io, "usage error\n"),
             error.InvalidTag => try stderr.writeStreamingAll(init.io, "invalid tag: use [A-Za-z0-9_-]\n"),
             error.EmptyText => try stderr.writeStreamingAll(init.io, "cannot add an empty todo\n"),
-            error.InvalidColor => try stderr.writeStreamingAll(init.io, "invalid color: use #rrggbb\n"),
+            error.InvalidColor => try stderr.writeStreamingAll(init.io, "invalid color: use \\#rrggbb\n"),
         }
         std.process.exit(1);
     };
@@ -567,7 +567,7 @@ pub fn main(init: std.process.Init) !void {
             \\  todo clear @tag [@tag...]   delete todos with any listed tag
             \\  todo clear <id>             delete one active todo by id
             \\  todo tag <id> +@tag -@tag   add/remove tags on an active todo
-            \\  todo color @tag #rrggbb     set display color for a tag
+            \\  todo color @tag \#rrggbb    set display color for a tag
             \\  todo color @tag             unset display color for a tag
             \\  todo tags                   list all tags with usage counts
             \\  todo -h, --help             show this help
