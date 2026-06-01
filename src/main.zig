@@ -382,6 +382,69 @@ fn renderList(
     for (items) |it| try writeItemLine(writer, "", it, col, cm);
 }
 
+fn renderTags(
+    arena: std.mem.Allocator,
+    writer: anytype,
+    s: *store.Store,
+) !void {
+    const stats = try s.listAllTagStats(arena);
+    const raw_colors = try s.listTagColors(arena);
+
+    var cm_entries: std.ArrayList(color.TagColor) = .empty;
+    for (raw_colors) |rc| {
+        const c = color.parseHex(rc.color) catch continue;
+        cm_entries.append(arena, .{ .tag = rc.tag, .color = c }) catch {};
+    }
+    const cm = color.ColorMap{ .entries = cm_entries.items };
+
+    if (stats.len == 0) {
+        try writer.writeAll("no tags\n");
+        return;
+    }
+
+    var max_tag_w: usize = 0;
+    for (stats) |st| {
+        const w = 1 + st.tag.len;
+        if (w > max_tag_w) max_tag_w = w;
+    }
+
+    for (stats) |st| {
+        try color.writeTagColored(writer, cm, st.tag);
+        const visual_w = 1 + st.tag.len;
+        var pad = visual_w;
+        while (pad < max_tag_w + 4) : (pad += 1) try writer.writeByte(' ');
+
+        const has_color = cm.get(st.tag) != null;
+        if (has_color) {
+            for (raw_colors) |rc| {
+                if (std.mem.eql(u8, rc.tag, st.tag)) {
+                    try writer.writeAll(rc.color);
+                    break;
+                }
+            }
+        } else {
+            try writer.writeAll("       ");
+        }
+        try writer.writeAll("    ");
+
+        var wrote_any = false;
+        if (st.active > 0) {
+            try writer.print("active: {d}", .{st.active});
+            wrote_any = true;
+        }
+        if (st.done > 0) {
+            if (wrote_any) try writer.writeAll("  ");
+            try writer.print("done: {d}", .{st.done});
+            wrote_any = true;
+        }
+        if (st.cleared > 0) {
+            if (wrote_any) try writer.writeAll("  ");
+            try writer.print("cleared: {d}", .{st.cleared});
+        }
+        try writer.writeAll("\n");
+    }
+}
+
 fn todoPath(arena: std.mem.Allocator, env: *std.process.Environ.Map) ![]const u8 {
     if (env.get("TODO_FILE")) |p| return arena.dupe(u8, p);
     if (env.get("XDG_DATA_HOME")) |x|
@@ -566,7 +629,13 @@ pub fn main(init: std.process.Init) !void {
             if (ebuf.items.len > 0)
                 try stderr.writeStreamingAll(init.io, ebuf.items);
         },
-        .tags_list => {},
+        .tags_list => {
+            var aw = std.Io.Writer.Allocating.init(arena);
+            defer aw.deinit();
+            try renderTags(arena, &aw.writer, &s);
+            const buf = aw.toArrayList();
+            try stdout.writeStreamingAll(init.io, buf.items);
+        },
         .help => unreachable,
     }
 }
@@ -1130,4 +1199,44 @@ test "runTagEdit: unknown id prints warning" {
     var buf = ew.toArrayList();
     defer buf.deinit(std.testing.allocator);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "999") != null);
+}
+
+test "renderTags: shows tags with active and done counts" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    _ = try s.add("a", &[_][]const u8{"urgent"});
+    _ = try s.add("b", &[_][]const u8{"urgent"});
+    const id3 = try s.add("c", &[_][]const u8{"backend"});
+    try s.markCompleted(id3, null);
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    try renderTags(arena, &aw.writer, &s);
+    var buf = aw.toArrayList();
+    defer buf.deinit(std.testing.allocator);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "@urgent") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "active: 2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "@backend") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "done: 1") != null);
+}
+
+test "renderTags: empty store prints no tags" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    try renderTags(arena, &aw.writer, &s);
+    var buf = aw.toArrayList();
+    defer buf.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("no tags\n", buf.items);
 }
