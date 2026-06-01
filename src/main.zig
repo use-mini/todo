@@ -1,6 +1,7 @@
 const std = @import("std");
 const store = @import("store.zig");
 const parse = @import("parse.zig");
+const color = @import("color.zig");
 
 pub const CliError = error{
     UsageError,
@@ -437,6 +438,7 @@ test {
     std.testing.refAllDecls(@This());
     _ = store;
     _ = parse;
+    _ = color;
 }
 
 test "classifyArgv: bare invocation is plain list" {
