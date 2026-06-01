@@ -198,6 +198,36 @@ test "color: set and unset tag color" {
     try std.testing.expect(std.mem.indexOf(u8, r.stdout, "urgent") != null);
 }
 
+test "colors: load colors from file" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var buf: [128]u8 = undefined;
+    const db = mkdb(&buf);
+
+    var fbuf: [128]u8 = undefined;
+    var n: u64 = undefined;
+    _ = std.os.linux.getrandom(@ptrCast(&n), @sizeOf(u64), 0);
+    const colors_file = std.fmt.bufPrint(&fbuf, "/tmp/todo_colors_{x}.txt", .{n}) catch unreachable;
+    defer std.Io.Dir.cwd().deleteFile(io, colors_file) catch {};
+
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = colors_file, .data = "urgent=#ff0000\nwork=#00ff00\n" });
+
+    var r = try invoke(allocator, io, db, &.{ "colors", colors_file });
+    allocator.free(r.stdout);
+    allocator.free(r.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
+
+    r = try invoke(allocator, io, db, &.{ "buy milk", "@urgent" });
+    allocator.free(r.stdout);
+    allocator.free(r.stderr);
+
+    r = try invoke(allocator, io, db, &.{"tags"});
+    defer allocator.free(r.stdout);
+    defer allocator.free(r.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
+    try std.testing.expect(std.mem.indexOf(u8, r.stdout, "#ff0000") != null);
+}
+
 test "tags: shows counts by state" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;

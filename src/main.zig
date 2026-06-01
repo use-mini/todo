@@ -22,6 +22,7 @@ pub const TagEditArgs = struct {
 };
 pub const ColorSetArgs = struct { tag: []const u8, color: []const u8 };
 pub const ColorUnsetArgs = struct { tag: []const u8 };
+pub const ColorsFileArgs = struct { path: []const u8 };
 
 pub const Command = union(enum) {
     list: ListArgs,
@@ -31,6 +32,7 @@ pub const Command = union(enum) {
     tag_edit: TagEditArgs,
     color_set: ColorSetArgs,
     color_unset: ColorUnsetArgs,
+    colors_file: ColorsFileArgs,
     tags_list,
     help,
 };
@@ -87,6 +89,11 @@ pub fn classifyArgv(arena: std.mem.Allocator, argv: []const []const u8) (CliErro
             return .{ .color_set = .{ .tag = tag, .color = argv[2] } };
         }
         return CliError.UsageError;
+    }
+
+    if (std.mem.eql(u8, argv[0], "colors")) {
+        if (argv.len != 2) return CliError.UsageError;
+        return .{ .colors_file = .{ .path = argv[1] } };
     }
 
     if (std.mem.eql(u8, argv[0], "tags")) {
@@ -564,6 +571,34 @@ fn runColorUnset(s: *store.Store, cmd: ColorUnsetArgs) !void {
     try s.removeTagColor(cmd.tag);
 }
 
+fn runColorsFile(s: *store.Store, arena: std.mem.Allocator, content: []const u8, err_writer: anytype) !void {
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    var line_no: usize = 0;
+    while (lines.next()) |line| {
+        line_no += 1;
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+
+        const eq = std.mem.indexOf(u8, trimmed, "=") orelse {
+            try err_writer.print("line {d}: expected tag=color\n", .{line_no});
+            continue;
+        };
+        const tag_raw = std.mem.trim(u8, trimmed[0..eq], " \t");
+        const color_raw = std.mem.trim(u8, trimmed[eq + 1 ..], " \t");
+
+        const tag = parse.normalizeFilterTag(arena, tag_raw) catch {
+            try err_writer.print("line {d}: invalid tag '{s}'\n", .{ line_no, tag_raw });
+            continue;
+        };
+        _ = color.parseHex(color_raw) catch {
+            try err_writer.print("line {d}: invalid color '{s}'\n", .{ line_no, color_raw });
+            continue;
+        };
+
+        try s.setTagColor(tag, color_raw);
+    }
+}
+
 fn runTagEdit(s: *store.Store, cmd: TagEditArgs, err_writer: anytype) !void {
     s.updateItemTags(cmd.id, cmd.add_tags, cmd.remove_tags) catch |err| switch (err) {
         store.StoreError.NotFound => {
@@ -625,6 +660,7 @@ pub fn main(init: std.process.Init) !void {
             \\  todo tag <id> +@tag -@tag   add/remove tags on an active todo
             \\  todo color @tag \#rrggbb    set display color for a tag
             \\  todo color @tag             unset display color for a tag
+            \\  todo colors <file>          load tag colors from file (tag=\#rrggbb per line)
             \\  todo tags                   list all tags with usage counts
             \\  todo -h, --help             show this help
             \\
@@ -682,6 +718,18 @@ pub fn main(init: std.process.Init) !void {
         },
         .color_set => |cs| try runColorSet(&s, cs),
         .color_unset => |cu| try runColorUnset(&s, cu),
+        .colors_file => |cf| {
+            const content = std.Io.Dir.cwd().readFileAlloc(init.io, cf.path, arena, .unlimited) catch {
+                try stderr.writeStreamingAll(init.io, "could not read colors file\n");
+                std.process.exit(1);
+            };
+            var ew = std.Io.Writer.Allocating.init(arena);
+            defer ew.deinit();
+            try runColorsFile(&s, arena, content, &ew.writer);
+            const ebuf = ew.toArrayList();
+            if (ebuf.items.len > 0)
+                try stderr.writeStreamingAll(init.io, ebuf.items);
+        },
         .tag_edit => |te| {
             var ew = std.Io.Writer.Allocating.init(arena);
             defer ew.deinit();
@@ -1176,6 +1224,23 @@ test "classifyArgv: color with bad hex returns InvalidColor" {
         classifyArgv(arena, &[_][]const u8{ "color", "@urgent", "notahex" }));
 }
 
+test "classifyArgv: colors parses path" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const cmd = try classifyArgv(arena, &[_][]const u8{ "colors", "/tmp/foo.txt" });
+    try std.testing.expect(cmd == .colors_file);
+    try std.testing.expectEqualStrings("/tmp/foo.txt", cmd.colors_file.path);
+}
+
+test "classifyArgv: colors without path is usage error" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try std.testing.expectError(CliError.UsageError,
+        classifyArgv(arena, &[_][]const u8{"colors"}));
+}
+
 test "classifyArgv: tags returns tags_list" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -1229,6 +1294,79 @@ test "runColorUnset: removes color from db" {
     defer arena_state.deinit();
     const colors = try s.listTagColors(arena_state.allocator());
     try std.testing.expectEqual(@as(usize, 0), colors.len);
+}
+
+test "runColorsFile: applies tag=color lines" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var ew = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer { var b = ew.toArrayList(); b.deinit(std.testing.allocator); }
+    try runColorsFile(&s, arena, "urgent=#ff0000\nwork=#00ff00\n", &ew.writer);
+    const ebuf = ew.toArrayList();
+    try std.testing.expectEqualStrings("", ebuf.items);
+
+    const colors = try s.listTagColors(arena);
+    try std.testing.expectEqual(@as(usize, 2), colors.len);
+}
+
+test "runColorsFile: skips empty lines" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var ew = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer { var b = ew.toArrayList(); b.deinit(std.testing.allocator); }
+    try runColorsFile(&s, arena, "\n\nurgent=#ff0000\n\n", &ew.writer);
+    const colors = try s.listTagColors(arena);
+    try std.testing.expectEqual(@as(usize, 1), colors.len);
+}
+
+test "runColorsFile: reports bad lines to err_writer" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var ew = std.Io.Writer.Allocating.init(std.testing.allocator);
+    try runColorsFile(&s, arena, "urgent=notacolor\nbad line\n", &ew.writer);
+    var ebuf = ew.toArrayList();
+    defer ebuf.deinit(std.testing.allocator);
+    try std.testing.expect(std.mem.indexOf(u8, ebuf.items, "line 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ebuf.items, "line 2") != null);
+
+    const colors = try s.listTagColors(arena);
+    try std.testing.expectEqual(@as(usize, 0), colors.len);
+}
+
+test "runColorsFile: normalizes tag names" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var ew = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer { var b = ew.toArrayList(); b.deinit(std.testing.allocator); }
+    try runColorsFile(&s, arena, "Urgent=#ff0000\n@Work=#00ff00\n", &ew.writer);
+    const colors = try s.listTagColors(arena);
+    try std.testing.expectEqual(@as(usize, 2), colors.len);
+    try std.testing.expectEqualStrings("urgent", colors[0].tag);
+    try std.testing.expectEqualStrings("work", colors[1].tag);
 }
 
 test "runTagEdit: adds and removes tags" {
