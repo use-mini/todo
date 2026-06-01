@@ -202,14 +202,17 @@ fn maxWidth(indent: []const u8, items: []const store.Item) usize {
     return m;
 }
 
-fn writeItemLine(writer: anytype, indent: []const u8, it: store.Item, col: usize) !void {
+fn writeItemLine(writer: anytype, indent: []const u8, it: store.Item, col: usize, cm: color.ColorMap) !void {
     try writer.print("{s}{d}. {s}", .{ indent, it.id, it.text });
     if (it.tags.len > 0) {
         const w = itemTextWidth(indent, it);
         var i = w;
         while (i < col) : (i += 1) try writer.writeByte(' ');
         try writer.writeAll(" |");
-        for (it.tags) |tg| try writer.print(" @{s}", .{tg});
+        for (it.tags) |tg| {
+            try writer.writeByte(' ');
+            try color.writeTagColored(writer, cm, tg);
+        }
     }
     try writer.writeAll("\n");
 }
@@ -218,14 +221,14 @@ fn writeBreakdown(
     writer: anytype,
     items: []const store.Item,
     filter_tags: []const []const u8,
+    cm: color.ColorMap,
 ) !void {
     const col = maxWidth("  ", items);
-    try writer.writeAll("@");
-    try writer.writeAll(filter_tags[0]);
+    try color.writeTagColored(writer, cm, filter_tags[0]);
     var i: usize = 1;
     while (i < filter_tags.len) : (i += 1) {
-        try writer.writeAll(" + @");
-        try writer.writeAll(filter_tags[i]);
+        try writer.writeAll(" + ");
+        try color.writeTagColored(writer, cm, filter_tags[i]);
     }
     try writer.writeAll("\n");
     var printed_any = false;
@@ -236,15 +239,15 @@ fn writeBreakdown(
             break;
         };
         if (all) {
-            try writeItemLine(writer, "  ", it, col);
+            try writeItemLine(writer, "  ", it, col, cm);
             printed_any = true;
         }
     }
     if (!printed_any) try writer.writeAll("  (none)\n");
 
     for (filter_tags) |t| {
-        try writer.writeAll("\n@");
-        try writer.writeAll(t);
+        try writer.writeAll("\n");
+        try color.writeTagColored(writer, cm, t);
         try writer.writeAll("\n");
         var any = false;
         for (items) |it| {
@@ -258,7 +261,7 @@ fn writeBreakdown(
                 }
             }
             if (!others) {
-                try writeItemLine(writer, "  ", it, col);
+                try writeItemLine(writer, "  ", it, col, cm);
                 any = true;
             }
         }
@@ -289,6 +292,7 @@ fn writePerTagBlocks(
     items: []const store.Item,
     tags_in_order: []const []const u8,
     leading_blank: bool,
+    cm: color.ColorMap,
 ) !void {
     const col = maxWidth("  ", items);
     var any_block = false;
@@ -299,8 +303,9 @@ fn writePerTagBlocks(
         };
         if (!has_any) continue;
         if (any_block or leading_blank) try writer.writeAll("\n");
-        try writer.print("@{s}\n", .{t});
-        for (items) |it| if (itemHasTag(it, t)) try writeItemLine(writer, "  ", it, col);
+        try color.writeTagColored(writer, cm, t);
+        try writer.writeAll("\n");
+        for (items) |it| if (itemHasTag(it, t)) try writeItemLine(writer, "  ", it, col, cm);
         any_block = true;
     }
 }
@@ -309,6 +314,7 @@ fn writeUntaggedBlock(
     writer: anytype,
     items: []const store.Item,
     leading_blank: bool,
+    cm: color.ColorMap,
 ) !void {
     var has_any = false;
     for (items) |it| if (it.tags.len == 0) {
@@ -319,7 +325,7 @@ fn writeUntaggedBlock(
     if (leading_blank) try writer.writeAll("\n");
     try writer.writeAll("[untagged]\n");
     const col = maxWidth("  ", items);
-    for (items) |it| if (it.tags.len == 0) try writeItemLine(writer, "  ", it, col);
+    for (items) |it| if (it.tags.len == 0) try writeItemLine(writer, "  ", it, col, cm);
 }
 
 fn renderList(
@@ -327,6 +333,7 @@ fn renderList(
     writer: anytype,
     s: *store.Store,
     cmd: ListArgs,
+    cm: color.ColorMap,
 ) !void {
     const items = if (cmd.filter_tags.len == 0)
         try s.listActive(arena)
@@ -341,7 +348,7 @@ fn renderList(
             try writer.writeAll("no todos matching ");
             for (cmd.filter_tags, 0..) |t, i| {
                 if (i != 0) try writer.writeAll(" or ");
-                try writer.print("@{s}", .{t});
+                try color.writeTagColored(writer, cm, t);
             }
             try writer.writeAll("\n");
         }
@@ -350,29 +357,29 @@ fn renderList(
 
     if (cmd.all and cmd.filter_tags.len == 0) {
         const tags = try collectAllTags(arena, items);
-        try writePerTagBlocks(writer, items, tags, false);
-        try writeUntaggedBlock(writer, items, true);
+        try writePerTagBlocks(writer, items, tags, false, cm);
+        try writeUntaggedBlock(writer, items, true, cm);
         return;
     }
 
     if (cmd.filter_tags.len >= 2) {
-        try writeBreakdown(writer, items, cmd.filter_tags);
+        try writeBreakdown(writer, items, cmd.filter_tags, cm);
         if (cmd.all) {
             try writer.writeAll("\n");
-            try writePerTagBlocks(writer, items, cmd.filter_tags, false);
+            try writePerTagBlocks(writer, items, cmd.filter_tags, false, cm);
         }
         return;
     }
 
     if (cmd.filter_tags.len == 1) {
         const col = maxWidth("", items);
-        for (items) |it| try writeItemLine(writer, "", it, col);
-        if (cmd.all) try writePerTagBlocks(writer, items, cmd.filter_tags, true);
+        for (items) |it| try writeItemLine(writer, "", it, col, cm);
+        if (cmd.all) try writePerTagBlocks(writer, items, cmd.filter_tags, true, cm);
         return;
     }
 
     const col = maxWidth("", items);
-    for (items) |it| try writeItemLine(writer, "", it, col);
+    for (items) |it| try writeItemLine(writer, "", it, col, cm);
 }
 
 fn todoPath(arena: std.mem.Allocator, env: *std.process.Environ.Map) ![]const u8 {
@@ -519,9 +526,16 @@ pub fn main(init: std.process.Init) !void {
 
     switch (cmd) {
         .list => |l| {
+            const raw_colors = try s.listTagColors(arena);
+            var cm_entries: std.ArrayList(color.TagColor) = .empty;
+            for (raw_colors) |rc| {
+                const c = color.parseHex(rc.color) catch continue;
+                cm_entries.append(arena, .{ .tag = rc.tag, .color = c }) catch {};
+            }
+            const cm = color.ColorMap{ .entries = cm_entries.items };
             var aw = std.Io.Writer.Allocating.init(arena);
             defer aw.deinit();
-            try renderList(arena, &aw.writer, &s, l);
+            try renderList(arena, &aw.writer, &s, l, cm);
             const buf = aw.toArrayList();
             try stdout.writeStreamingAll(init.io, buf.items);
         },
@@ -672,7 +686,8 @@ test "renderList: empty active set, no -q, prints 'no todos'" {
     const arena = arena_state.allocator();
 
     var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
-    try renderList(arena, &aw.writer, &s, .{ .quiet = false, .all = false, .filter_tags = &.{} });
+    const empty_cm = color.ColorMap{ .entries = &.{} };
+    try renderList(arena, &aw.writer, &s, .{ .quiet = false, .all = false, .filter_tags = &.{} }, empty_cm);
     var buf = aw.toArrayList();
     defer buf.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("no todos\n", buf.items);
@@ -688,7 +703,8 @@ test "renderList: empty active set, -q, prints nothing" {
     const arena = arena_state.allocator();
 
     var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
-    try renderList(arena, &aw.writer, &s, .{ .quiet = true, .all = false, .filter_tags = &.{} });
+    const empty_cm = color.ColorMap{ .entries = &.{} };
+    try renderList(arena, &aw.writer, &s, .{ .quiet = true, .all = false, .filter_tags = &.{} }, empty_cm);
     var buf = aw.toArrayList();
     defer buf.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("", buf.items);
@@ -706,7 +722,8 @@ test "renderList: flat list shows id, text, tags" {
     const arena = arena_state.allocator();
 
     var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
-    try renderList(arena, &aw.writer, &s, .{ .quiet = false, .all = false, .filter_tags = &.{} });
+    const empty_cm = color.ColorMap{ .entries = &.{} };
+    try renderList(arena, &aw.writer, &s, .{ .quiet = false, .all = false, .filter_tags = &.{} }, empty_cm);
     var buf = aw.toArrayList();
     defer buf.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("1. first  | @urgent\n2. second\n", buf.items);
@@ -830,11 +847,12 @@ test "renderList: single -l shows a flat list with no header" {
     const arena = arena_state.allocator();
 
     var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    const empty_cm = color.ColorMap{ .entries = &.{} };
     try renderList(arena, &aw.writer, &s, .{
         .quiet = false,
         .all = false,
         .filter_tags = &[_][]const u8{"urgent"},
-    });
+    }, empty_cm);
     var buf = aw.toArrayList();
     defer buf.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("1. a | @urgent\n", buf.items);
@@ -853,11 +871,12 @@ test "renderList: two -l tags produce breakdown sections" {
     const arena = arena_state.allocator();
 
     var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    const empty_cm = color.ColorMap{ .entries = &.{} };
     try renderList(arena, &aw.writer, &s, .{
         .quiet = false,
         .all = false,
         .filter_tags = &[_][]const u8{ "urgent", "backend" },
-    });
+    }, empty_cm);
     var buf = aw.toArrayList();
     defer buf.deinit(std.testing.allocator);
 
@@ -886,11 +905,12 @@ test "renderList: --all with no filter, items grouped by tag with [untagged]" {
     const arena = arena_state.allocator();
 
     var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    const empty_cm = color.ColorMap{ .entries = &.{} };
     try renderList(arena, &aw.writer, &s, .{
         .quiet = false,
         .all = true,
         .filter_tags = &.{},
-    });
+    }, empty_cm);
     var buf = aw.toArrayList();
     defer buf.deinit(std.testing.allocator);
 
@@ -918,11 +938,12 @@ test "renderList: --all with single -l appends per-tag block" {
     const arena = arena_state.allocator();
 
     var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    const empty_cm = color.ColorMap{ .entries = &.{} };
     try renderList(arena, &aw.writer, &s, .{
         .quiet = false,
         .all = true,
         .filter_tags = &[_][]const u8{"urgent"},
-    });
+    }, empty_cm);
     var buf = aw.toArrayList();
     defer buf.deinit(std.testing.allocator);
 
