@@ -12,7 +12,7 @@ pub const CliError = error{
 
 pub const ListArgs = struct { quiet: bool, all: bool, filter_tags: []const []const u8 };
 pub const AddArgs = struct { text: []const u8, tags: []const []const u8 };
-pub const DoneArgs = struct { id: i64 };
+pub const DoneArgs = struct { id: i64, note: ?[]const u8 = null };
 pub const ClearArgs = struct { filter_tags: []const []const u8, all: bool = false };
 
 pub const Command = union(enum) {
@@ -33,9 +33,17 @@ pub fn classifyArgv(arena: std.mem.Allocator, argv: []const []const u8) (CliErro
     }
 
     if (std.mem.eql(u8, argv[0], "done")) {
-        if (argv.len != 2) return CliError.UsageError;
+        if (argv.len < 2) return CliError.UsageError;
         const id = std.fmt.parseInt(i64, argv[1], 10) catch return CliError.NotAnId;
-        return .{ .done = .{ .id = id } };
+        const note: ?[]const u8 = if (argv.len > 2) blk: {
+            var buf: std.ArrayList(u8) = .empty;
+            for (argv[2..], 0..) |w, wi| {
+                if (wi != 0) buf.append(arena, ' ') catch return CliError.UsageError;
+                buf.appendSlice(arena, w) catch return CliError.UsageError;
+            }
+            break :blk buf.items;
+        } else null;
+        return .{ .done = .{ .id = id, .note = note } };
     }
 
     if (std.mem.eql(u8, argv[0], "clear")) {
@@ -324,7 +332,7 @@ fn runAdd(s: *store.Store, cmd: AddArgs) !void {
 }
 
 fn runDone(s: *store.Store, cmd: DoneArgs, err_writer: anytype) !void {
-    s.markCompleted(cmd.id) catch |err| switch (err) {
+    s.markCompleted(cmd.id, cmd.note) catch |err| switch (err) {
         store.StoreError.NotFound => {
             var buf: [128]u8 = undefined;
             const msg = try std.fmt.bufPrint(&buf, "no todo with id {d}\n", .{cmd.id});
@@ -634,9 +642,9 @@ test "runDone: already done prints warning" {
     defer s.close();
     try s.initSchema();
     const id = try s.add("do laundry", &.{});
-    try s.markCompleted(id);
+    try s.markCompleted(id, null);
     var ew = std.Io.Writer.Allocating.init(std.testing.allocator);
-    try runDone(&s, .{ .id = id }, &ew.writer);
+    try runDone(&s, .{ .id = id, .note = null }, &ew.writer);
     var buf = ew.toArrayList();
     defer buf.deinit(std.testing.allocator);
     try std.testing.expect(std.mem.startsWith(u8, buf.items, "todo "));
@@ -804,4 +812,23 @@ test "renderList: --all with single -l appends per-tag block" {
         "@urgent\n" ++
         "  1. a | @urgent\n";
     try std.testing.expectEqualStrings(expected, buf.items);
+}
+
+test "classifyArgv: done with note joins tokens" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const cmd = try classifyArgv(arena, &[_][]const u8{ "done", "5", "shipped", "to", "prod" });
+    try std.testing.expect(cmd == .done);
+    try std.testing.expectEqual(@as(i64, 5), cmd.done.id);
+    try std.testing.expectEqualStrings("shipped to prod", cmd.done.note.?);
+}
+
+test "classifyArgv: done without note has null note" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const cmd = try classifyArgv(arena, &[_][]const u8{ "done", "5" });
+    try std.testing.expect(cmd == .done);
+    try std.testing.expect(cmd.done.note == null);
 }

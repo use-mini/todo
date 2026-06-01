@@ -249,7 +249,7 @@ pub const Store = struct {
         return out;
     }
 
-    pub fn markCompleted(self: *Store, id: i64) StoreError!void {
+    pub fn markCompleted(self: *Store, id: i64, note: ?[]const u8) StoreError!void {
         const check = try prepare(self.db,
             "SELECT state FROM items WHERE id=?");
         defer _ = c.sqlite3_finalize(check);
@@ -262,12 +262,17 @@ pub const Store = struct {
         if (!std.mem.eql(u8, state, "active")) return StoreError.AlreadyDone;
 
         const stmt = try prepare(self.db,
-            "UPDATE items SET state='completed', completed_at=? WHERE id=?");
+            "UPDATE items SET state='completed', completed_at=?, completion_note=? WHERE id=?");
         defer _ = c.sqlite3_finalize(stmt);
         var ts: std.os.linux.timespec = undefined;
         _ = std.os.linux.clock_gettime(.REALTIME, &ts);
         try bindInt(stmt, 1, ts.sec);
-        try bindInt(stmt, 2, id);
+        if (note) |n| {
+            try bindText(stmt, 2, n);
+        } else {
+            if (c.sqlite3_bind_null(stmt, 2) != c.SQLITE_OK) return StoreError.BindFailed;
+        }
+        try bindInt(stmt, 3, id);
         if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return StoreError.StepFailed;
     }
 
@@ -430,7 +435,7 @@ test "markCompleted flips active->completed and is one-way" {
     try s.initSchema();
 
     const id = try s.add("ship it", &.{});
-    try s.markCompleted(id);
+    try s.markCompleted(id, null);
 
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -439,10 +444,8 @@ test "markCompleted flips active->completed and is one-way" {
     const items = try s.listActive(arena);
     try std.testing.expectEqual(@as(usize, 0), items.len);
 
-    // re-marking a completed item returns AlreadyDone
-    try std.testing.expectError(StoreError.AlreadyDone, s.markCompleted(id));
-    // missing id returns NotFound
-    try std.testing.expectError(StoreError.NotFound, s.markCompleted(99_999));
+    try std.testing.expectError(StoreError.AlreadyDone, s.markCompleted(id, null));
+    try std.testing.expectError(StoreError.NotFound, s.markCompleted(99_999, null));
 }
 
 test "clearActive transitions every active item; clearActiveByTags scopes by tag" {
@@ -507,5 +510,38 @@ test "initSchema: completion_note column exists after init" {
     defer _ = c.sqlite3_finalize(stmt);
     _ = c.sqlite3_bind_int64(stmt, 1, id);
     try std.testing.expectEqual(@as(c_int, c.SQLITE_ROW), c.sqlite3_step(stmt));
+    try std.testing.expectEqual(@as(c_int, c.SQLITE_NULL), c.sqlite3_column_type(stmt, 0));
+}
+
+test "markCompleted stores completion note" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    const id = try s.add("ship it", &.{});
+    try s.markCompleted(id, "deployed to prod");
+
+    var stmt: ?*c.sqlite3_stmt = null;
+    _ = c.sqlite3_prepare_v2(s.db,
+        "SELECT completion_note FROM items WHERE id=?", -1, &stmt, null);
+    defer _ = c.sqlite3_finalize(stmt);
+    _ = c.sqlite3_bind_int64(stmt, 1, id);
+    try std.testing.expectEqual(@as(c_int, c.SQLITE_ROW), c.sqlite3_step(stmt));
+    try std.testing.expectEqualStrings("deployed to prod",
+        std.mem.sliceTo(c.sqlite3_column_text(stmt, 0), 0));
+}
+
+test "markCompleted with null note stores NULL" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    const id = try s.add("ship it", &.{});
+    try s.markCompleted(id, null);
+
+    var stmt: ?*c.sqlite3_stmt = null;
+    _ = c.sqlite3_prepare_v2(s.db,
+        "SELECT completion_note FROM items WHERE id=?", -1, &stmt, null);
+    defer _ = c.sqlite3_finalize(stmt);
+    _ = c.sqlite3_bind_int64(stmt, 1, id);
+    _ = c.sqlite3_step(stmt);
     try std.testing.expectEqual(@as(c_int, c.SQLITE_NULL), c.sqlite3_column_type(stmt, 0));
 }
