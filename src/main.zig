@@ -390,16 +390,33 @@ fn countDigits(n: usize) usize {
     return count;
 }
 
-fn writeRightAligned(writer: anytype, n: usize, width: usize) !void {
-    var i: usize = countDigits(n);
-    while (i < width) : (i += 1) try writer.writeByte(' ');
-    try writer.print("{d}", .{n});
+fn writeCentered(writer: anytype, s: []const u8, width: usize) !void {
+    const pad = if (width > s.len) width - s.len else 0;
+    const left = pad / 2;
+    const right = pad - left;
+    var i: usize = 0;
+    while (i < left) : (i += 1) try writer.writeByte(' ');
+    try writer.writeAll(s);
+    i = 0;
+    while (i < right) : (i += 1) try writer.writeByte(' ');
 }
 
-fn writeRightAlignedStr(writer: anytype, s: []const u8, width: usize) !void {
-    var i: usize = s.len;
-    while (i < width) : (i += 1) try writer.writeByte(' ');
-    try writer.writeAll(s);
+fn writeCenteredNum(writer: anytype, n: usize, width: usize) !void {
+    var buf: [32]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "{d}", .{n}) catch unreachable;
+    try writeCentered(writer, s, width);
+}
+
+fn writeTagCentered(writer: anytype, cm: color.ColorMap, tag: []const u8, width: usize) !void {
+    const visual_w = 1 + tag.len;
+    const pad = if (width > visual_w) width - visual_w else 0;
+    const left = pad / 2;
+    const right = pad - left;
+    var i: usize = 0;
+    while (i < left) : (i += 1) try writer.writeByte(' ');
+    try color.writeTagColored(writer, cm, tag);
+    i = 0;
+    while (i < right) : (i += 1) try writer.writeByte(' ');
 }
 
 fn renderTags(
@@ -434,32 +451,33 @@ fn renderTags(
         if (st.cleared > max_cleared) max_cleared = st.cleared;
     }
 
-    const gap = 3;
     const color_col_w = 7; // #rrggbb
     const active_w = @max("active".len, countDigits(max_active));
     const done_w = @max("done".len, countDigits(max_done));
     const cleared_w = @max("cleared".len, countDigits(max_cleared));
 
-    // Header
-    try writer.writeAll("tag");
-    var pad: usize = "tag".len;
-    while (pad < max_tag_w + gap) : (pad += 1) try writer.writeByte(' ');
-    try writer.writeAll("color");
-    pad = "color".len;
-    while (pad < color_col_w + gap) : (pad += 1) try writer.writeByte(' ');
-    try writeRightAlignedStr(writer, "active", active_w);
-    try writer.writeAll("   ");
-    try writeRightAlignedStr(writer, "done", done_w);
-    try writer.writeAll("   ");
-    try writeRightAlignedStr(writer, "cleared", cleared_w);
+    try writeCentered(writer, "tag", max_tag_w);
+    try writer.writeAll(" | ");
+    try writeCentered(writer, "color", color_col_w);
+    try writer.writeAll(" | ");
+    try writeCentered(writer, "active", active_w);
+    try writer.writeAll(" | ");
+    try writeCentered(writer, "done", done_w);
+    try writer.writeAll(" | ");
+    try writeCentered(writer, "cleared", cleared_w);
     try writer.writeByte('\n');
 
-    // Rows
+    const col_widths = [_]usize{ max_tag_w, color_col_w, active_w, done_w, cleared_w };
+    for (col_widths, 0..) |w, idx| {
+        if (idx > 0) try writer.writeAll("-|-");
+        var j: usize = 0;
+        while (j < w) : (j += 1) try writer.writeByte('-');
+    }
+    try writer.writeByte('\n');
+
     for (stats) |st| {
-        try color.writeTagColored(writer, cm, st.tag);
-        const visual_w = 1 + st.tag.len;
-        pad = visual_w;
-        while (pad < max_tag_w + gap) : (pad += 1) try writer.writeByte(' ');
+        try writeTagCentered(writer, cm, st.tag, max_tag_w);
+        try writer.writeAll(" | ");
 
         const has_color = cm.get(st.tag) != null;
         if (has_color) {
@@ -472,14 +490,13 @@ fn renderTags(
         } else {
             try writer.writeAll("       ");
         }
-        pad = color_col_w;
-        while (pad < color_col_w + gap) : (pad += 1) try writer.writeByte(' ');
+        try writer.writeAll(" | ");
 
-        try writeRightAligned(writer, st.active, active_w);
-        try writer.writeAll("   ");
-        try writeRightAligned(writer, st.done, done_w);
-        try writer.writeAll("   ");
-        try writeRightAligned(writer, st.cleared, cleared_w);
+        try writeCenteredNum(writer, st.active, active_w);
+        try writer.writeAll(" | ");
+        try writeCenteredNum(writer, st.done, done_w);
+        try writer.writeAll(" | ");
+        try writeCenteredNum(writer, st.cleared, cleared_w);
         try writer.writeByte('\n');
     }
 }
