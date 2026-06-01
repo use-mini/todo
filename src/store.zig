@@ -340,6 +340,40 @@ pub const Store = struct {
         try bindInt(stmt, 2, id);
         if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return StoreError.StepFailed;
     }
+
+    pub fn setTagColor(self: *Store, tag: []const u8, color_hex: []const u8) StoreError!void {
+        const stmt = try prepare(self.db,
+            "INSERT OR REPLACE INTO tag_colors (tag, color) VALUES (?, ?)");
+        defer _ = c.sqlite3_finalize(stmt);
+        try bindText(stmt, 1, tag);
+        try bindText(stmt, 2, color_hex);
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return StoreError.StepFailed;
+    }
+
+    pub fn removeTagColor(self: *Store, tag: []const u8) StoreError!void {
+        const stmt = try prepare(self.db, "DELETE FROM tag_colors WHERE tag=?");
+        defer _ = c.sqlite3_finalize(stmt);
+        try bindText(stmt, 1, tag);
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return StoreError.StepFailed;
+    }
+
+    pub fn listTagColors(self: *Store, arena: std.mem.Allocator) StoreError![]TagColorRaw {
+        const sel = try prepare(self.db,
+            "SELECT tag, color FROM tag_colors ORDER BY tag");
+        defer _ = c.sqlite3_finalize(sel);
+        var result: std.ArrayList(TagColorRaw) = .empty;
+        while (true) {
+            const rc = c.sqlite3_step(sel);
+            if (rc == c.SQLITE_DONE) break;
+            if (rc != c.SQLITE_ROW) return StoreError.StepFailed;
+            const tag_dup = arena.dupe(u8,
+                std.mem.sliceTo(c.sqlite3_column_text(sel, 0), 0)) catch return StoreError.OutOfMemory;
+            const color_dup = arena.dupe(u8,
+                std.mem.sliceTo(c.sqlite3_column_text(sel, 1), 0)) catch return StoreError.OutOfMemory;
+            result.append(arena, .{ .tag = tag_dup, .color = color_dup }) catch return StoreError.OutOfMemory;
+        }
+        return result.items;
+    }
 };
 
 test "open + initSchema creates tables idempotently" {
@@ -372,6 +406,11 @@ pub const Item = struct {
     text: []const u8,
     created_at: i64,
     tags: [][]const u8,
+};
+
+pub const TagColorRaw = struct {
+    tag: []const u8,
+    color: []const u8,
 };
 
 test "add returns id; getById round-trips text and tags" {
@@ -594,4 +633,55 @@ test "clearById: completed item returns NotActive" {
     const id = try s.add("task", &.{});
     try s.markCompleted(id, null);
     try std.testing.expectError(StoreError.NotActive, s.clearById(id));
+}
+
+test "setTagColor and listTagColors round-trip" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    try s.setTagColor("urgent", "#ff5500");
+    try s.setTagColor("backend", "#0055ff");
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const colors = try s.listTagColors(arena_state.allocator());
+    try std.testing.expectEqual(@as(usize, 2), colors.len);
+    try std.testing.expectEqualStrings("backend", colors[0].tag);
+    try std.testing.expectEqualStrings("#0055ff", colors[0].color);
+    try std.testing.expectEqualStrings("urgent", colors[1].tag);
+    try std.testing.expectEqualStrings("#ff5500", colors[1].color);
+}
+
+test "setTagColor upserts on duplicate tag" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    try s.setTagColor("urgent", "#ff5500");
+    try s.setTagColor("urgent", "#00ff00");
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const colors = try s.listTagColors(arena_state.allocator());
+    try std.testing.expectEqual(@as(usize, 1), colors.len);
+    try std.testing.expectEqualStrings("#00ff00", colors[0].color);
+}
+
+test "removeTagColor deletes the entry" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    try s.setTagColor("urgent", "#ff5500");
+    try s.removeTagColor("urgent");
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const colors = try s.listTagColors(arena_state.allocator());
+    try std.testing.expectEqual(@as(usize, 0), colors.len);
+}
+
+test "removeTagColor on nonexistent tag is a no-op" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    try s.removeTagColor("missing");
 }
