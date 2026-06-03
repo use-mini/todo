@@ -14,6 +14,7 @@ pub const CliError = error{
 pub const ListArgs = struct { quiet: bool, all: bool, filter_tags: []const []const u8 };
 pub const AddArgs = struct { text: []const u8, tags: []const []const u8 };
 pub const DoneArgs = struct { id: i64, note: ?[]const u8 = null };
+pub const DoneListArgs = struct { filter_tags: []const []const u8 };
 pub const ClearArgs = struct { filter_tags: []const []const u8, all: bool = false, id: ?i64 = null };
 pub const TagEditArgs = struct {
     id: i64,
@@ -28,6 +29,7 @@ pub const Command = union(enum) {
     list: ListArgs,
     add: AddArgs,
     done: DoneArgs,
+    done_list: DoneListArgs,
     clear: ClearArgs,
     tag_edit: TagEditArgs,
     color_set: ColorSetArgs,
@@ -47,17 +49,24 @@ pub fn classifyArgv(arena: std.mem.Allocator, argv: []const []const u8) (CliErro
     }
 
     if (std.mem.eql(u8, argv[0], "done")) {
-        if (argv.len < 2) return CliError.UsageError;
-        const id = std.fmt.parseInt(i64, argv[1], 10) catch return CliError.NotAnId;
-        const note: ?[]const u8 = if (argv.len > 2) blk: {
-            var buf: std.ArrayList(u8) = .empty;
-            for (argv[2..], 0..) |w, wi| {
-                if (wi != 0) buf.append(arena, ' ') catch return CliError.UsageError;
-                buf.appendSlice(arena, w) catch return CliError.UsageError;
-            }
-            break :blk buf.items;
-        } else null;
-        return .{ .done = .{ .id = id, .note = note } };
+        if (argv.len < 2) return .{ .done_list = .{ .filter_tags = &.{} } };
+        if (std.fmt.parseInt(i64, argv[1], 10) catch null) |id| {
+            const note: ?[]const u8 = if (argv.len > 2) blk: {
+                var buf: std.ArrayList(u8) = .empty;
+                for (argv[2..], 0..) |w, wi| {
+                    if (wi != 0) buf.append(arena, ' ') catch return CliError.UsageError;
+                    buf.appendSlice(arena, w) catch return CliError.UsageError;
+                }
+                break :blk buf.items;
+            } else null;
+            return .{ .done = .{ .id = id, .note = note } };
+        }
+        var tags: std.ArrayList([]const u8) = .empty;
+        for (argv[1..]) |tok| {
+            const norm = try parse.normalizeFilterTag(arena, tok);
+            tags.append(arena, norm) catch return CliError.UsageError;
+        }
+        return .{ .done_list = .{ .filter_tags = tags.items } };
     }
 
     if (std.mem.eql(u8, argv[0], "clear")) {
@@ -389,6 +398,52 @@ fn renderList(
     for (items) |it| try writeItemLine(writer, "", it, col, cm);
 }
 
+fn renderDoneList(
+    arena: std.mem.Allocator,
+    writer: anytype,
+    s: *store.Store,
+    cmd: DoneListArgs,
+    cm: color.ColorMap,
+) !void {
+    const all_items = try s.listCompleted(arena);
+
+    var items: std.ArrayList(store.Item) = .empty;
+    for (all_items) |it| {
+        if (cmd.filter_tags.len == 0) {
+            items.append(arena, it) catch return error.OutOfMemory;
+            continue;
+        }
+        for (cmd.filter_tags) |ft| {
+            if (itemHasTag(it, ft)) {
+                items.append(arena, it) catch return error.OutOfMemory;
+                break;
+            }
+        }
+    }
+
+    if (items.items.len == 0) {
+        if (cmd.filter_tags.len == 0) {
+            try writer.writeAll("no completed todos\n");
+        } else {
+            try writer.writeAll("no completed todos matching ");
+            for (cmd.filter_tags, 0..) |t, i| {
+                if (i != 0) try writer.writeAll(" or ");
+                try color.writeTagColored(writer, cm, t);
+            }
+            try writer.writeAll("\n");
+        }
+        return;
+    }
+
+    const col = maxWidth("", items.items);
+    for (items.items) |it| {
+        try writeItemLine(writer, "", it, col, cm);
+        if (it.completion_note) |note| {
+            try writer.print("   {s}\n", .{note});
+        }
+    }
+}
+
 fn countDigits(n: usize) usize {
     if (n == 0) return 1;
     var x = n;
@@ -653,6 +708,8 @@ pub fn main(init: std.process.Init) !void {
             \\  todo "text @tag1 @tag2"     add todo with trailing tags
             \\  todo "text @@tag"           add todo with inline tag
             \\  todo -t <tag> "text"        add todo with explicit tag
+            \\  todo done                   list completed todos
+            \\  todo done @tag [@tag...]    list completed todos with any listed tag
             \\  todo done <id> [note]       mark todo complete with optional note
             \\  todo clear --all            delete all active todos
             \\  todo clear @tag [@tag...]   delete todos with any listed tag
@@ -696,6 +753,20 @@ pub fn main(init: std.process.Init) !void {
             var aw = std.Io.Writer.Allocating.init(arena);
             defer aw.deinit();
             try renderList(arena, &aw.writer, &s, l, cm);
+            const buf = aw.toArrayList();
+            try stdout.writeStreamingAll(init.io, buf.items);
+        },
+        .done_list => |dl| {
+            const raw_colors = try s.listTagColors(arena);
+            var cm_entries: std.ArrayList(color.TagColor) = .empty;
+            for (raw_colors) |rc| {
+                const c2 = color.parseHex(rc.color) catch continue;
+                cm_entries.append(arena, .{ .tag = rc.tag, .color = c2 }) catch {};
+            }
+            const cm = color.ColorMap{ .entries = cm_entries.items };
+            var aw = std.Io.Writer.Allocating.init(arena);
+            defer aw.deinit();
+            try renderDoneList(arena, &aw.writer, &s, dl, cm);
             const buf = aw.toArrayList();
             try stdout.writeStreamingAll(init.io, buf.items);
         },
@@ -1440,4 +1511,125 @@ test "renderTags: empty store prints no tags" {
     var buf = aw.toArrayList();
     defer buf.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("no tags\n", buf.items);
+}
+
+test "classifyArgv: done alone returns done_list with no filter" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const cmd = try classifyArgv(arena, &[_][]const u8{"done"});
+    try std.testing.expect(cmd == .done_list);
+    try std.testing.expectEqual(@as(usize, 0), cmd.done_list.filter_tags.len);
+}
+
+test "classifyArgv: done @tag returns done_list with filter" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const cmd = try classifyArgv(arena, &[_][]const u8{ "done", "@work", "@urgent" });
+    try std.testing.expect(cmd == .done_list);
+    try std.testing.expectEqual(@as(usize, 2), cmd.done_list.filter_tags.len);
+    try std.testing.expectEqualStrings("work", cmd.done_list.filter_tags[0]);
+    try std.testing.expectEqualStrings("urgent", cmd.done_list.filter_tags[1]);
+}
+
+test "renderDoneList: empty store prints message" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    const empty_cm = color.ColorMap{ .entries = &.{} };
+    try renderDoneList(arena, &aw.writer, &s, .{ .filter_tags = &.{} }, empty_cm);
+    var buf = aw.toArrayList();
+    defer buf.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("no completed todos\n", buf.items);
+}
+
+test "renderDoneList: shows completed items with tags newest-first" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    const id1 = try s.add("first", &[_][]const u8{"urgent"});
+    const id2 = try s.add("second", &.{});
+    _ = try s.add("still active", &.{});
+    try s.markCompleted(id1, null);
+    try s.markCompleted(id2, null);
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    const empty_cm = color.ColorMap{ .entries = &.{} };
+    try renderDoneList(arena, &aw.writer, &s, .{ .filter_tags = &.{} }, empty_cm);
+    var buf = aw.toArrayList();
+    defer buf.deinit(std.testing.allocator);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "second") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "first") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "still active") == null);
+}
+
+test "renderDoneList: shows completion note indented" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    const id = try s.add("ship it", &.{});
+    try s.markCompleted(id, "deployed to prod");
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    const empty_cm = color.ColorMap{ .entries = &.{} };
+    try renderDoneList(arena, &aw.writer, &s, .{ .filter_tags = &.{} }, empty_cm);
+    var buf = aw.toArrayList();
+    defer buf.deinit(std.testing.allocator);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "deployed to prod") != null);
+}
+
+test "renderDoneList: tag filter shows only matching items" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    const id1 = try s.add("work task", &[_][]const u8{"work"});
+    const id2 = try s.add("personal task", &[_][]const u8{"personal"});
+    try s.markCompleted(id1, null);
+    try s.markCompleted(id2, null);
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    const empty_cm = color.ColorMap{ .entries = &.{} };
+    try renderDoneList(arena, &aw.writer, &s, .{ .filter_tags = &[_][]const u8{"work"} }, empty_cm);
+    var buf = aw.toArrayList();
+    defer buf.deinit(std.testing.allocator);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "work task") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "personal task") == null);
+}
+
+test "renderDoneList: no match with filter prints message" {
+    var s = try store.Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    const id = try s.add("work task", &[_][]const u8{"work"});
+    try s.markCompleted(id, null);
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    const empty_cm = color.ColorMap{ .entries = &.{} };
+    try renderDoneList(arena, &aw.writer, &s, .{ .filter_tags = &[_][]const u8{"missing"} }, empty_cm);
+    var buf = aw.toArrayList();
+    defer buf.deinit(std.testing.allocator);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "no completed todos matching") != null);
 }

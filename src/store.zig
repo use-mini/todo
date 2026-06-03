@@ -87,6 +87,7 @@ pub const Item = struct {
     text: []const u8,
     created_at: i64,
     tags: [][]const u8,
+    completion_note: ?[]const u8 = null,
 };
 
 pub const TagColorRaw = struct {
@@ -267,6 +268,38 @@ pub const Store = struct {
             out[i] = try self.getById(arena, id);
         }
         return out;
+    }
+
+    pub fn listCompleted(self: *Store, arena: std.mem.Allocator) StoreError![]Item {
+        const sel = try prepare(self.db,
+            "SELECT id, text, created_at, completion_note FROM items WHERE state='completed' ORDER BY completed_at DESC, id DESC");
+        defer _ = c.sqlite3_finalize(sel);
+
+        var result: std.ArrayList(Item) = .empty;
+        while (true) {
+            const rc = c.sqlite3_step(sel);
+            if (rc == c.SQLITE_DONE) break;
+            if (rc != c.SQLITE_ROW) return StoreError.StepFailed;
+
+            const id = c.sqlite3_column_int64(sel, 0);
+            const text_dup = arena.dupe(u8,
+                std.mem.sliceTo(c.sqlite3_column_text(sel, 1), 0)) catch return StoreError.OutOfMemory;
+            const created_at = c.sqlite3_column_int64(sel, 2);
+            const note: ?[]const u8 = if (c.sqlite3_column_type(sel, 3) != c.SQLITE_NULL) blk: {
+                break :blk arena.dupe(u8,
+                    std.mem.sliceTo(c.sqlite3_column_text(sel, 3), 0)) catch return StoreError.OutOfMemory;
+            } else null;
+
+            const tags_item = try self.getById(arena, id);
+            result.append(arena, Item{
+                .id = id,
+                .text = text_dup,
+                .created_at = created_at,
+                .tags = tags_item.tags,
+                .completion_note = note,
+            }) catch return StoreError.OutOfMemory;
+        }
+        return result.items;
     }
 
     pub fn markCompleted(self: *Store, id: i64, note: ?[]const u8) StoreError!void {
@@ -875,4 +908,70 @@ test "updateItemTags: completed item returns NotActive" {
     try s.markCompleted(id, null);
     try std.testing.expectError(StoreError.NotActive,
         s.updateItemTags(id, &[_][]const u8{"urgent"}, &.{}));
+}
+
+test "listCompleted: empty store returns empty slice" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const items = try s.listCompleted(arena_state.allocator());
+    try std.testing.expectEqual(@as(usize, 0), items.len);
+}
+
+test "listCompleted: returns completed items with text and tags" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    const id1 = try s.add("first", &[_][]const u8{"urgent"});
+    const id2 = try s.add("second", &.{});
+    _ = try s.add("still active", &.{});
+    try s.markCompleted(id1, null);
+    try s.markCompleted(id2, null);
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const items = try s.listCompleted(arena_state.allocator());
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+    try std.testing.expectEqualStrings("second", items[0].text);
+    try std.testing.expectEqualStrings("first", items[1].text);
+    try std.testing.expectEqual(@as(usize, 1), items[1].tags.len);
+    try std.testing.expectEqualStrings("urgent", items[1].tags[0]);
+}
+
+test "listCompleted: completion_note is populated when present" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    const id1 = try s.add("noted", &.{});
+    const id2 = try s.add("silent", &.{});
+    try s.markCompleted(id1, "shipped it");
+    try s.markCompleted(id2, null);
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const items = try s.listCompleted(arena_state.allocator());
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+    try std.testing.expectEqualStrings("silent", items[0].text);
+    try std.testing.expect(items[0].completion_note == null);
+    try std.testing.expectEqualStrings("noted", items[1].text);
+    try std.testing.expectEqualStrings("shipped it", items[1].completion_note.?);
+}
+
+test "listCompleted: active and cleared items are excluded" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    try s.initSchema();
+    _ = try s.add("active", &.{});
+    const id2 = try s.add("done", &.{});
+    const id3 = try s.add("cleared", &.{});
+    try s.markCompleted(id2, null);
+    try s.clearById(id3);
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const items = try s.listCompleted(arena_state.allocator());
+    try std.testing.expectEqual(@as(usize, 1), items.len);
+    try std.testing.expectEqualStrings("done", items[0].text);
 }
