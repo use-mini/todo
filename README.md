@@ -20,6 +20,8 @@ todo --all                        group active todos by tag, plus [untagged]
 todo "text @tag1 @tag2"           add; trailing @tags are extracted
 todo "call @@doctor for refill"   inline tag: stored as "@doctor", tag = doctor
 todo -t urgent "text"             add with explicit tag (repeatable)
+todo done                         list completed todos
+todo done @tag [@tag...]          list completed todos with any listed tag (OR match)
 todo done <id> [note]             mark complete; optional note is stored
 todo clear --all                  soft-delete all active items
 todo clear @tag [@tag...]         soft-delete active items having any listed tag
